@@ -1,0 +1,17 @@
+html, body { margin: 0; height: 100%; background: #111; color: #ddd;
+             font: 13px system-ui, sans-serif; overflow: hidden; }
+#layout { position: fixed; inset: 0; }
+#strip { position: fixed; top: 0; left: 0; right: 0; z-index: 10; height: 4px;
+         background: #e6a700; text-indent: -9999px; }
+.pane { position: absolute; box-sizing: border-box; padding: 2px; }
+.bar { height: 22px; display: flex; gap: 4px; align-items: center; padding: 0 4px;
+       background: #2a2a2a; border-radius: 3px 3px 0 0; user-select: none; }
+.bar select, .bar button { font: inherit; background: #444; color: #ddd; border: 0;
+                           border-radius: 2px; padding: 1px 5px; }
+.bar button:hover { background: #666; }
+.bar .grow { flex: 1; }
+.body { position: absolute; inset: 24px 2px 2px 2px; contain: strict; background: #1e1e1e; }
+.pane.single .body { inset: 0; }
+.handle { position: absolute; z-index: 5; touch-action: none; }
+.handle.v { width: 8px; margin-left: -4px; cursor: col-resize; }
+.handle.h { height: 8px; margin-top: -4px; cursor: row-resize; }
