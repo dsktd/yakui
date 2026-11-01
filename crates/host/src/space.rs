@@ -30,6 +30,10 @@ use crate::registry::Registry;
 #[serde(try_from = "String")]
 pub struct SpaceId(String);
 impl SpaceId {
+    /// 128 random bits as hex, the same shape the shell makes.
+    pub fn random() -> Self {
+        Self(format!("{:032x}", rand::random::<u128>()))
+    }
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -266,5 +270,7 @@ mod test {
         assert!("abcdefghijklmno-".parse::<SpaceId>().is_err());
         assert!("../../../../etc/x".parse::<SpaceId>().is_err());
         assert!("abcdefghijklmnöp".parse::<SpaceId>().is_err());
+        assert!(SpaceId::random().as_str().parse::<SpaceId>().is_ok());
+        assert_ne!(SpaceId::random(), SpaceId::random());
     }
 }
