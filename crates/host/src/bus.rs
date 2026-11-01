@@ -68,10 +68,20 @@ impl Local {
         origin: HostId,
     ) -> Result<Self> {
         let path = path.into();
-        let retained = match std::fs::read(&path) {
+        let entries: BTreeMap<String, Value> = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)?,
             Err(_) => BTreeMap::new(),
         };
+        // An entry that is not a message (a hand edit) is dropped, not the whole space.
+        let mut retained = BTreeMap::new();
+        for (topic, entry) in entries {
+            match serde_json::from_value::<Message>(entry) {
+                Ok(msg) => {
+                    retained.insert(topic, msg);
+                }
+                Err(err) => warn!("{}: dropped {topic}: {err}", path.display()),
+            }
+        }
         let mut inner = LocalInner {
             origin,
             retained,
@@ -705,6 +715,17 @@ mod test {
         );
         let reason = queued[0].2.value["reason"].as_str().unwrap();
         assert!(reason.contains("malformed"));
+        // An entry that is not a message is dropped; the others load.
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{ "scene": 5, "view2d/view": {{ "value": {{ "zoom": 4 }}, "origin": "{origin}", "seq": 2 }} }}"#
+            ),
+        )
+        .unwrap();
+        let partial = open(&path);
+        assert_eq!(partial.retained(Topic::SCENE), None);
+        assert_eq!(partial.retained("view2d/view").unwrap().seq, Some(2));
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }
