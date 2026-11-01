@@ -80,7 +80,11 @@ impl Pane for Inspector {
             serde_json::from_value::<[f64; 3]>(value.clone()),
         ) {
             ("position", Ok(position)) => Command::MoveObject { id, position },
-            _ => Command::SetProperty { id, key, value },
+            _ => Command::SetProperty {
+                ids: vec![id],
+                key,
+                value,
+            },
         };
         self.bus.command(cmd);
     }

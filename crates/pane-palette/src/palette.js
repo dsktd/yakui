@@ -1,6 +1,7 @@
 // A palette grid; a pick is one message. Which swatch is lit comes from the scene.
 import { mount as paletteGrid } from '../widgets/palette-grid.js';
 import { Emits } from '../protocol.js';
+import { flash } from '../note.js';
 
 export function mount(root, { send, onEvent }) {
   root.innerHTML = `<style>
@@ -8,17 +9,7 @@ export function mount(root, { send, onEvent }) {
     .note.warn { color: #e6a700; }
   </style><div class="grid"></div><div class="note">select something first</div>`;
   const note = root.querySelector('.note');
-  let noteTimer = null;
   let status = '';
-  const show = (text, warn) => {
-    note.textContent = text;
-    note.classList.toggle('warn', !!warn);
-  };
-  const flash = (text) => {
-    show(text, true);
-    clearTimeout(noteTimer);
-    noteTimer = setTimeout(() => show(status, false), 2500);
-  };
   const grid = paletteGrid(root.querySelector('.grid'), { colors: [], selected: null }, (name, { value }) => {
     if (name === Emits.PICK) send({ Pick: { color: value } });
   });
@@ -27,12 +18,9 @@ export function mount(root, { send, onEvent }) {
       const { colors, selected, color } = e.State;
       grid.update({ colors, selected: color ?? null, columns: 6 });
       status = selected.length ? `${selected.length} selected` : 'select something first';
-      if (noteTimer === null) show(status, false);
-    } else if (e.Rejected) flash(e.Rejected.reason);
-    else if (e.Unsupported) flash(`protocol version ${JSON.stringify(e.Unsupported.version)} is not one this pane knows`);
+      if (!note.classList.contains('warn')) note.textContent = status;
+    } else if (e.Rejected) flash(note, e.Rejected.reason, () => status);
+    else if (e.Unsupported) flash(note, `protocol version ${JSON.stringify(e.Unsupported.version)} is not one this pane knows`, () => status);
   });
-  return () => {
-    grid.destroy();
-    clearTimeout(noteTimer);
-  };
+  return () => grid.destroy();
 }

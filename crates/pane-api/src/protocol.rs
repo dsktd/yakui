@@ -160,9 +160,10 @@ pub enum Command {
     RemoveObjects {
         ids: Vec<String>,
     },
-    /// A known key of [`Object`] (not `id`), or any other key into `props`.
+    /// On every object of `ids` or on none: a known key of [`Object`] (not `id`), or any
+    /// other key into `props`.
     SetProperty {
-        id: String,
+        ids: Vec<String>,
         key: String,
         value: Value,
     },

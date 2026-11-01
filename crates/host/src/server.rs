@@ -36,6 +36,8 @@ const INDEX: &str = include_str!("../web/index.html");
 const SHELL_JS: &str = include_str!("../web/shell.js");
 const SHELL_CSS: &str = include_str!("../web/shell.css");
 const PROTOCOL_JS: &str = include_str!("../web/protocol.js");
+/// `flash`, the note line the pane modules share (`../note.js`); widgets must not import it.
+const NOTE_JS: &str = include_str!("../web/note.js");
 /// The widgets (PROTOCOL.md, DESIGN.md "Widgets"): pane modules import them as
 /// `../widgets/<name>.js`, so they resolve under any proxy prefix.
 const WIDGETS: [(&str, &str); 6] = [
@@ -72,6 +74,7 @@ pub async fn serve(
         .route("/shell.js", get(shell_js))
         .route("/shell.css", get(shell_css))
         .route("/protocol.js", get(protocol_js))
+        .route("/note.js", get(note_js))
         .route("/widgets/{name}", get(widget))
         .route("/modules/{kind}", get(module))
         .route("/ws", get(ws))
@@ -114,6 +117,10 @@ async fn shell_css() -> Response {
 
 async fn protocol_js() -> Response {
     ([(header::CONTENT_TYPE, "text/javascript")], PROTOCOL_JS).into_response()
+}
+
+async fn note_js() -> Response {
+    ([(header::CONTENT_TYPE, "text/javascript")], NOTE_JS).into_response()
 }
 
 async fn widget(Path(name): Path<String>) -> Response {
@@ -269,5 +276,32 @@ mod tests {
                 assert!(line.contains(" from './"), "{file}: {line}");
             }
         }
+    }
+
+    #[test]
+    fn panes_import_widgets_protocol_and_note() {
+        let mut registry = crate::registry::Registry::default();
+        registry.add::<pane_clock::Clock>();
+        registry.add::<pane_inspector::Inspector>();
+        registry.add::<pane_notes::Notes>();
+        registry.add::<pane_outliner::Outliner>();
+        registry.add::<pane_palette::Palette>();
+        registry.add::<pane_view2d::View2d>();
+        registry.add::<pane_view3d::View3d>();
+        registry.add::<pane_widgets::Widgets>();
+        let widgets: Vec<_> = WIDGETS.iter().map(|(file, _source)| *file).collect();
+        for kind in registry.kinds() {
+            let source = registry.module(kind).unwrap();
+            for line in source.lines().filter(|line| line.starts_with("import ")) {
+                let ok = line.ends_with(" from '../protocol.js';")
+                    || line.ends_with(" from '../note.js';")
+                    || widgets
+                        .iter()
+                        .any(|w| line.ends_with(&format!(" from '../widgets/{w}';")));
+                assert!(ok, "{kind}: {line}");
+            }
+        }
+        assert!(NOTE_JS.contains("export function flash("));
+        assert!(!NOTE_JS.lines().any(|line| line.starts_with("import ")));
     }
 }

@@ -243,10 +243,9 @@ Built 2026-11-01, as PROTOCOL.md says, with these choices:
   "#rrggbb", props? }`; view2d shows the x/y plane (y up), view3d the same
   scene with an orbit camera. Panes read it with the tolerant readers in
   `pane-api::protocol` (a bad object is skipped, a bad topic reads as empty).
-- Seeding: a viewport subscribes `scene` before `protocol`, so when the
-  retained `protocol` arrives without a `scene` before it the space is fresh
-  and the viewport publishes four `add_object` commands with fixed ids; a
-  second viewport seeding at the same moment is refused object by object.
+- Seeding: the host retains four objects (fixed ids) as `scene` when a
+  space's bus has none, before any pane subscribes; a viewport never seeds
+  and tolerates a missing `scene`.
 - Private retained topics: `view2d/view` (`{ x, y, zoom }`) and
   `view3d/camera` (`{ yaw, pitch, distance, target }`), one per space, so a
   reload or another client sees the same view.

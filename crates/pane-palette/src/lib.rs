@@ -94,13 +94,11 @@ impl Pane for Palette {
             });
             return;
         }
-        for id in &self.selection.ids {
-            self.bus.command(Command::SetProperty {
-                id: id.clone(),
-                key: "color".to_owned(),
-                value: json!(color),
-            });
-        }
+        self.bus.command(Command::SetProperty {
+            ids: self.selection.ids.clone(),
+            key: "color".to_owned(),
+            value: json!(color),
+        });
     }
     fn on_message(
         &mut self,
