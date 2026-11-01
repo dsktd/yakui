@@ -43,7 +43,7 @@ impl Pane for Notes {
         out: &mut Out<Event>,
     ) {
         let Msg::SetText { text } = msg;
-        if let Err(err) = std::fs::write(&self.path, &text) {
+        if let Err(err) = self.persist(&text) {
             warn!("notes {}: {err}", self.path.display());
         }
         self.text = text;
@@ -53,5 +53,16 @@ impl Pane for Notes {
         Event::Text {
             text: self.text.clone(),
         }
+    }
+}
+impl Notes {
+    /// Write next to the file and rename over it, so a kill never leaves it half written.
+    fn persist(
+        &self,
+        text: &str,
+    ) -> std::io::Result<()> {
+        let tmp = self.path.with_extension("tmp");
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, &self.path)
     }
 }
