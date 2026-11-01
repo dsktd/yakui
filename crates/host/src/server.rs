@@ -13,7 +13,6 @@ use axum::http::StatusCode;
 use axum::http::header;
 use axum::response::Html;
 use axum::response::IntoResponse;
-use axum::response::Json;
 use axum::response::Response;
 use axum::routing::get;
 use futures_util::SinkExt;
@@ -30,22 +29,26 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::Result;
 use crate::host::Host;
 use crate::layout::Op;
+use crate::space::Space;
+use crate::space::SpaceId;
 
 const INDEX: &str = include_str!("../web/index.html");
 const SHELL_JS: &str = include_str!("../web/shell.js");
 const SHELL_CSS: &str = include_str!("../web/shell.css");
 
+/// The shell's pages: `/` goes to the browser's own space, `/s/<space>/` is the layout and
+/// `/s/<space>/pane/<id>` one pane. A malformed space id is a 400 from the path extractor.
 pub async fn serve(
     host: Host,
     port: u16,
 ) -> Result<()> {
     let app = Router::new()
         .route("/", get(index))
-        .route("/pane/{id}", get(pane_index))
+        .route("/s/{space}/", get(space_index))
+        .route("/s/{space}/pane/{id}", get(pane_index))
         .route("/shell.js", get(shell_js))
         .route("/shell.css", get(shell_css))
         .route("/modules/{kind}", get(module))
-        .route("/layout", get(layout))
         .route("/ws", get(ws))
         .with_state(host);
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?;
@@ -58,13 +61,22 @@ async fn index() -> Html<String> {
     Html(INDEX.to_string())
 }
 
-/// One level deep, so relative URLs need `..` to reach the root, behind any proxy prefix.
-async fn pane_index() -> Html<String> {
-    Html(with_base(INDEX))
+async fn space_index(Path(_space): Path<SpaceId>) -> Html<String> {
+    Html(with_base(INDEX, 2))
 }
 
-fn with_base(html: &str) -> String {
-    html.replacen("<head>", "<head>\n  <base href=\"../\">", 1)
+async fn pane_index(Path((_space, _pane)): Path<(SpaceId, PaneId)>) -> Html<String> {
+    Html(with_base(INDEX, 3))
+}
+
+/// `depth` levels deep, so relative URLs need that many `..` to reach the root, behind any
+/// proxy prefix.
+fn with_base(
+    html: &str,
+    depth: usize,
+) -> String {
+    let base = format!("<head>\n  <base href=\"{}\">", "../".repeat(depth));
+    html.replacen("<head>", &base, 1)
 }
 
 async fn shell_js() -> Response {
@@ -85,13 +97,10 @@ async fn module(
     }
 }
 
-async fn layout(State(host): State<Host>) -> Json<Value> {
-    Json(host.layout_json())
-}
-
 #[derive(Deserialize)]
 struct WsQuery {
-    /// Subscribe to this pane only (the `/pane/<id>` view).
+    space: SpaceId,
+    /// Subscribe to this pane only (the `/s/<space>/pane/<id>` view).
     pane: Option<PaneId>,
     /// Read-only: client -> pane messages and layout ops are dropped. `?ro=1` or `?ro=true`.
     ro: Option<String>,
@@ -116,24 +125,32 @@ async fn ws(
     State(host): State<Host>,
     Query(query): Query<WsQuery>,
 ) -> Response {
-    ws.on_upgrade(move |socket| connection(socket, host, query))
+    let space = match host.space(&query.space) {
+        Ok(space) => space,
+        Err(err) => {
+            error!("space {}: {err}", query.space);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    ws.on_upgrade(move |socket| connection(socket, space, query))
 }
 
 async fn connection(
     socket: WebSocket,
-    host: Host,
+    space: Space,
     query: WsQuery,
 ) {
     let (mut sink, mut stream) = socket.split();
     // Subscribe before snapshotting so nothing between the two is missed.
-    let mut rx = host.subscribe();
-    for frame in host.snapshot(query.pane) {
+    let mut rx = space.subscribe();
+    for frame in space.snapshot(query.pane) {
         if sink.send(Message::Text(frame.text.into())).await.is_err() {
             return;
         }
     }
     debug!(
-        "client joined pane={:?} ro={}",
+        "client joined space={} pane={:?} ro={}",
+        query.space,
         query.pane,
         query.read_only()
     );
@@ -175,15 +192,15 @@ async fn connection(
                 }
                 match incoming {
                     Incoming::Pane { pane_id, payload } => {
-                        if let Err(err) = host.update(pane_id, payload) {
+                        if let Err(err) = space.update(pane_id, payload) {
                             warn!("pane {pane_id}: {err}");
                         }
                     }
                     Incoming::Layout { layout: op } => {
-                        if let Err(err) = host.apply(op) {
+                        if let Err(err) = space.apply(op) {
                             // Correct the client's optimistic state.
                             error!("layout: {err}");
-                            let text = host.layout_json().to_string();
+                            let text = space.layout_json().to_string();
                             if sink.send(Message::Text(text.into())).await.is_err() {
                                 return;
                             }
@@ -200,9 +217,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pane_page_points_back_to_root() {
-        let html = with_base(INDEX);
-        assert!(html.contains("<head>\n  <base href=\"../\">"));
+    fn space_pages_point_back_to_root() {
+        assert!(with_base(INDEX, 2).contains("<head>\n  <base href=\"../../\">"));
+        assert!(with_base(INDEX, 3).contains("<head>\n  <base href=\"../../../\">"));
         assert!(!INDEX.contains("<base"));
         assert!(!INDEX.contains("=\"/"));
     }

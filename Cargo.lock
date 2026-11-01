@@ -1405,6 +1405,7 @@ dependencies = [
  "pane-api",
  "pane-clock",
  "pane-notes",
+ "rand",
  "serde",
  "serde_json",
  "tokio",

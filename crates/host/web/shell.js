@@ -3,8 +3,10 @@
 
 // Every URL derives from where this module was served, so a proxy may mount the host under any prefix.
 const base = new URL('.', import.meta.url);
-const single = location.pathname.match(/\/pane\/(\d+)$/);
-const only = single ? Number(single[1]) : null;
+// `/s/<space>/` or `/s/<space>/pane/<id>`; anything else is the root, which goes to this browser's own space.
+const at = location.pathname.match(/\/s\/([a-z0-9]+)\/(?:pane\/(\d+))?$/);
+const space = at ? at[1] : null;
+const only = at && at[2] ? Number(at[2]) : null;
 const roParam = new URLSearchParams(location.search).get('ro');
 const ro = roParam !== null && roParam !== '0' && roParam !== 'false';
 const strip = document.getElementById('strip');
@@ -17,8 +19,41 @@ let kinds = [];
 const panes = new Map();   // id -> { el, kind, listeners, pending, unmount, select }
 const handles = new Map(); // path string -> element
 
+// The id is made once per browser and kept; a reload or another tab lands in the same space.
+// Without storage (disabled, or a sandboxed page) the id lasts for this visit only.
+function home() {
+  let id = null;
+  try { id = localStorage.getItem('space'); } catch {}
+  if (!/^[a-z0-9]{16,64}$/.test(id)) {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    id = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    try { localStorage.setItem('space', id); } catch {}
+  }
+  const url = new URL(`s/${id}/`, base);
+  url.search = location.search;
+  location.replace(url);
+}
+
+// The space's link, to hand to another client; copied too where the browser allows it.
+function share() {
+  const box = document.getElementById('share');
+  const [input, button] = box.children;
+  input.value = new URL(`s/${space}/`, base).href;
+  button.onclick = () => {
+    input.hidden = !input.hidden;
+    if (input.hidden) return;
+    input.select();
+    navigator.clipboard?.writeText(input.value).then(() => {
+      button.textContent = 'copied';
+      setTimeout(() => { button.textContent = 'share'; }, 1500);
+    }, () => {});
+  };
+  box.hidden = false;
+}
+
 function connect() {
   const q = new URLSearchParams();
+  q.set('space', space);
   if (only !== null) q.set('pane', only);
   if (ro) q.set('ro', '1');
   const url = new URL('ws', base);
@@ -278,4 +313,8 @@ function bar(id, kind, pane) {
   return el;
 }
 
-connect();
+if (space === null) home();
+else {
+  if (only === null) share();
+  connect();
+}
