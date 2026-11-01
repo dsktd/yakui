@@ -1,6 +1,7 @@
 //! Shared state: the layout, the live panes and the fan-out channel.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -57,10 +58,7 @@ impl Host {
         };
         let mut panes = HashMap::new();
         for (id, entry) in &layout.panes {
-            let ctx = Ctx {
-                id: *id,
-                storage: dir.join("panes").join(id.to_string()),
-            };
+            let ctx = ctx(&dir, *id);
             panes.insert(*id, registry.make(&entry.kind, entry.config.clone(), ctx)?);
         }
         info!("{} panes from {}", panes.len(), path.display());
@@ -157,11 +155,7 @@ impl HostInner {
         kind: &str,
         id: PaneId,
     ) -> Result<Box<dyn AnyPane>> {
-        let ctx = Ctx {
-            id,
-            storage: self.dir.join("panes").join(id.to_string()),
-        };
-        self.registry.make(kind, Value::Null, ctx)
+        self.registry.make(kind, Value::Null, ctx(&self.dir, id))
     }
     fn save(&self) -> Result<()> {
         let path = self.dir.join("layout.json");
@@ -176,6 +170,16 @@ impl HostInner {
             pane: None,
             text: self.layout_json().to_string(),
         }
+    }
+}
+
+fn ctx(
+    dir: &Path,
+    id: PaneId,
+) -> Ctx {
+    Ctx {
+        id,
+        storage: dir.join("panes").join(id.to_string()),
     }
 }
 
