@@ -1404,7 +1404,13 @@ dependencies = [
  "log",
  "pane-api",
  "pane-clock",
+ "pane-inspector",
  "pane-notes",
+ "pane-outliner",
+ "pane-palette",
+ "pane-view2d",
+ "pane-view3d",
+ "pane-widgets",
  "rand",
  "serde",
  "serde_json",
@@ -2340,12 +2346,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "pane-inspector"
+version = "0.1.0"
+dependencies = [
+ "pane-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pane-notes"
 version = "0.1.0"
 dependencies = [
  "log",
  "pane-api",
  "serde",
+]
+
+[[package]]
+name = "pane-outliner"
+version = "0.1.0"
+dependencies = [
+ "pane-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pane-palette"
+version = "0.1.0"
+dependencies = [
+ "pane-api",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2364,6 +2397,13 @@ dependencies = [
  "pane-api",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "pane-widgets"
+version = "0.1.0"
+dependencies = [
+ "pane-api",
 ]
 
 [[package]]
