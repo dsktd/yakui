@@ -16,6 +16,7 @@ with the wheel, drag an object to move it, click to select it, `fit` to see ever
   `rejected/<pane>` (transient, standard); `view2d/view` (retained, private).
 - Topics published: `cmd` with `select` and `move_object`; `hover`; `view2d/view` retained
   as `{ x, y, zoom }` (world units, pixels per unit), shared by every view2d in the space.
+  All three are finite numbers and `zoom` is positive; any other `SetView` is logged and dropped.
 - Widgets: toolbar (`fit`, `clear`).
 - Smoothness: pointer work (pan, zoom, drag, hover hit-testing) never leaves the browser;
   each of the four messages above is one coarse message per interaction.

@@ -1,5 +1,6 @@
 //! The `scene` in WebGL with an orbit camera: drag to orbit, wheel to zoom, click to select.
 
+use log::warn;
 use pane_api::Bus;
 use pane_api::Ctx;
 use pane_api::Message;
@@ -15,10 +16,27 @@ use pane_api::protocol::Selection;
 use pane_api::protocol::Topic;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value;
 
 /// The camera at rest, shared by every view3d of the space and kept across reloads.
 const CAMERA: &str = "view3d/camera";
+
+/// The orbit camera: angles in radians, the distance to `target` in world units.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Camera {
+    yaw: f64,
+    pitch: f64,
+    distance: f64,
+    target: [f64; 3],
+}
+impl Camera {
+    fn is_valid(&self) -> bool {
+        self.yaw.is_finite()
+            && self.pitch.is_finite()
+            && self.distance.is_finite()
+            && self.distance > 0.0
+            && self.target.iter().all(|v| v.is_finite())
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub enum Msg {
@@ -27,7 +45,7 @@ pub enum Msg {
     /// The pointer came onto an object or left it.
     Hover { id: Option<String> },
     /// Orbit or zoom came to rest.
-    SetCamera { camera: Value },
+    SetCamera { camera: Camera },
 }
 
 #[derive(Serialize)]
@@ -35,7 +53,7 @@ pub enum Event {
     State {
         scene: Scene,
         selection: Selection,
-        camera: Value,
+        camera: Option<Camera>,
     },
     Scene {
         scene: Scene,
@@ -50,7 +68,7 @@ pub enum Event {
         id: String,
     },
     Camera {
-        camera: Value,
+        camera: Camera,
     },
     Rejected {
         reason: String,
@@ -65,7 +83,7 @@ pub struct View3d {
     rejected: String,
     scene: Scene,
     selection: Selection,
-    camera: Value,
+    camera: Option<Camera>,
 }
 impl Pane for View3d {
     const KIND: &'static str = "view3d";
@@ -91,7 +109,7 @@ impl Pane for View3d {
             rejected,
             scene: Scene::default(),
             selection: Selection::default(),
-            camera: Value::Null,
+            camera: None,
         }
     }
     fn update(
@@ -104,7 +122,14 @@ impl Pane for View3d {
             Msg::Hover { id } => self
                 .bus
                 .publish(Topic::HOVER, serde_json::to_value(Hover { id }).unwrap()),
-            Msg::SetCamera { camera } => self.bus.retain(CAMERA, camera),
+            Msg::SetCamera { camera } => {
+                if !camera.is_valid() {
+                    warn!("view3d: refusing camera {camera:?}");
+                    return;
+                }
+                self.bus
+                    .retain(CAMERA, serde_json::to_value(camera).unwrap());
+            }
         }
     }
     fn on_message(
@@ -144,10 +169,14 @@ impl Pane for View3d {
                 out.emit(Event::Focus { id: focus.id });
             }
             CAMERA => {
-                self.camera = msg.value;
-                out.emit(Event::Camera {
-                    camera: self.camera.clone(),
-                });
+                let Ok(camera) = serde_json::from_value::<Camera>(msg.value) else {
+                    return;
+                };
+                if !camera.is_valid() {
+                    return;
+                }
+                self.camera = Some(camera);
+                out.emit(Event::Camera { camera });
             }
             _ if topic == self.rejected => out.emit(Event::Rejected {
                 reason: Rejected::reason(&msg.value),
@@ -159,7 +188,43 @@ impl Pane for View3d {
         Event::State {
             scene: self.scene.clone(),
             selection: self.selection.clone(),
-            camera: self.camera.clone(),
+            camera: self.camera,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn test_camera_shape() {
+        let camera: Camera = serde_json::from_value(
+            json!({ "yaw": 0.6, "pitch": 0.4, "distance": 12, "target": [0, 1, 0] }),
+        )
+        .unwrap();
+        assert!(camera.is_valid());
+        assert!(
+            serde_json::from_value::<Camera>(json!({ "yaw": 0, "pitch": 0, "distance": 1 }))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<Camera>(
+                json!({ "yaw": 0, "pitch": 0, "distance": 1, "target": [0, 0] })
+            )
+            .is_err()
+        );
+        for distance in [0.0, -1.0, f64::NAN] {
+            assert!(!Camera { distance, ..camera }.is_valid());
+        }
+        assert!(
+            !Camera {
+                target: [0.0, f64::INFINITY, 0.0],
+                ..camera
+            }
+            .is_valid()
+        );
     }
 }

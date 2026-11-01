@@ -1,5 +1,6 @@
 //! A front view (x right, y up) of the `scene` on a canvas: pan, zoom, drag, click to select.
 
+use log::warn;
 use pane_api::Bus;
 use pane_api::Ctx;
 use pane_api::Message;
@@ -15,10 +16,22 @@ use pane_api::protocol::Selection;
 use pane_api::protocol::Topic;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value;
 
 /// The pan and zoom at rest, shared by every view2d of the space and kept across reloads.
 const VIEW: &str = "view2d/view";
+
+/// The pan and zoom: the centre in world units, and pixels per unit.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct View {
+    x: f64,
+    y: f64,
+    zoom: f64,
+}
+impl View {
+    fn is_valid(&self) -> bool {
+        self.x.is_finite() && self.y.is_finite() && self.zoom.is_finite() && self.zoom > 0.0
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub enum Msg {
@@ -29,7 +42,7 @@ pub enum Msg {
     /// An object was dropped after a drag.
     Move { id: String, position: [f64; 3] },
     /// Pan or zoom came to rest.
-    SetView { view: Value },
+    SetView { view: View },
 }
 
 #[derive(Serialize)]
@@ -37,7 +50,7 @@ pub enum Event {
     State {
         scene: Scene,
         selection: Selection,
-        view: Value,
+        view: Option<View>,
     },
     Scene {
         scene: Scene,
@@ -52,7 +65,7 @@ pub enum Event {
         id: String,
     },
     View {
-        view: Value,
+        view: View,
     },
     Rejected {
         reason: String,
@@ -67,7 +80,7 @@ pub struct View2d {
     rejected: String,
     scene: Scene,
     selection: Selection,
-    view: Value,
+    view: Option<View>,
 }
 impl Pane for View2d {
     const KIND: &'static str = "view2d";
@@ -93,7 +106,7 @@ impl Pane for View2d {
             rejected,
             scene: Scene::default(),
             selection: Selection::default(),
-            view: Value::Null,
+            view: None,
         }
     }
     fn update(
@@ -107,7 +120,13 @@ impl Pane for View2d {
                 .bus
                 .publish(Topic::HOVER, serde_json::to_value(Hover { id }).unwrap()),
             Msg::Move { id, position } => self.bus.command(Command::MoveObject { id, position }),
-            Msg::SetView { view } => self.bus.retain(VIEW, view),
+            Msg::SetView { view } => {
+                if !view.is_valid() {
+                    warn!("view2d: refusing view {view:?}");
+                    return;
+                }
+                self.bus.retain(VIEW, serde_json::to_value(view).unwrap());
+            }
         }
     }
     fn on_message(
@@ -147,10 +166,14 @@ impl Pane for View2d {
                 out.emit(Event::Focus { id: focus.id });
             }
             VIEW => {
-                self.view = msg.value;
-                out.emit(Event::View {
-                    view: self.view.clone(),
-                });
+                let Ok(view) = serde_json::from_value::<View>(msg.value) else {
+                    return;
+                };
+                if !view.is_valid() {
+                    return;
+                }
+                self.view = Some(view);
+                out.emit(Event::View { view });
             }
             _ if topic == self.rejected => out.emit(Event::Rejected {
                 reason: Rejected::reason(&msg.value),
@@ -162,7 +185,32 @@ impl Pane for View2d {
         Event::State {
             scene: self.scene.clone(),
             selection: self.selection.clone(),
-            view: self.view.clone(),
+            view: self.view,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn test_view_shape() {
+        let view: View = serde_json::from_value(json!({ "x": 1, "y": -2.5, "zoom": 40 })).unwrap();
+        assert!(view.is_valid());
+        assert!(serde_json::from_value::<View>(json!({ "x": 1, "y": 2 })).is_err());
+        assert!(serde_json::from_value::<View>(json!({ "x": "1", "y": 2, "zoom": 3 })).is_err());
+        for zoom in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(!View { zoom, ..view }.is_valid());
+        }
+        assert!(
+            !View {
+                x: f64::INFINITY,
+                ..view
+            }
+            .is_valid()
+        );
     }
 }
