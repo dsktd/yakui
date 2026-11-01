@@ -1,3 +1,4 @@
 /target
 .#*
 .direnv/
+crates/shell-tauri/gen/
