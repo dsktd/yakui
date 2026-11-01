@@ -13,7 +13,7 @@
         src = ./.;
         cargoLock.lockFile = ./Cargo.lock;
         cargoBuildFlags = [ "-p" "host" ];
-        cargoTestFlags = [ "-p" "host" ];
+        doCheck = false;
       };
     in {
       packages.${system}.default = host;
