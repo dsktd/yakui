@@ -112,7 +112,7 @@ impl Host {
         }
         Ok(())
     }
-    /// Apply a layout op, save, and broadcast the result. On error nothing changes.
+    /// Apply a layout op, broadcast the result, then save. On a bad op nothing changes.
     /// A pane the op created is snapshotted after the layout, so clients have mounted it.
     pub fn apply(
         &self,
@@ -152,12 +152,11 @@ impl Host {
                 Some(pane)
             }
         };
-        host.save()?;
         let _ = host.tx.send(host.layout_frame());
         if let Some(pane) = created {
             let _ = host.tx.send(pane_frame(pane, host.panes[&pane].snapshot()));
         }
-        Ok(())
+        host.save()
     }
 }
 
