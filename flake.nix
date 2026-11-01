@@ -21,6 +21,7 @@
       apps.${system}.default = {
         type = "app";
         program = "${host}/bin/host";
+        meta.description = "Run the yakui host";
       };
 
       devShells.${system}.default = pkgs.mkShell {
@@ -30,19 +31,9 @@
           clippy
           rustfmt
           rust-analyzer
-          gcc
           pkg-config
           webkitgtk_4_1
           gtk3
-          libsoup_3
-          dbus
-          openssl
-          glib
-          cairo
-          pango
-          gdk-pixbuf
-          atk
-          librsvg
         ];
         RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
       };
