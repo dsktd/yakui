@@ -53,8 +53,6 @@ subscriber.
 - Later, if wanted: a page listing spaces, renaming, deleting an empty one.
   Not v1.
 
-Name "space" is a placeholder for Cal to replace.
-
 ## Reconsidered for smoothness
 
 Draft 1 routed every pane interaction through `Pane::update` over the
