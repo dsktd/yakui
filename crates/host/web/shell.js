@@ -59,6 +59,14 @@ function findParent(node, pane) {
   return findParent(a, pane) || findParent(b, pane);
 }
 
+// The split holding leaf `pane` and its other child, or null at the root.
+function sibling(pane) {
+  const parent = findParent(layout.root, pane);
+  if (!parent) return null;
+  const { a, b } = parent.Split;
+  return { parent, other: 'Leaf' in a && a.Leaf.pane === pane ? b : a };
+}
+
 function apply(op) {
   if ('Split' in op) {
     const { pane, axis, new_pane, kind } = op.Split;
@@ -71,12 +79,10 @@ function apply(op) {
     layout.panes[new_pane] = { kind, config: null };
   } else if ('Join' in op) {
     const { pane } = op.Join;
-    const parent = findParent(layout.root, pane);
-    if (!parent) return;
-    const { a, b } = parent.Split;
-    const keep = 'Leaf' in a && a.Leaf.pane === pane ? b : a;
-    delete parent.Split;
-    Object.assign(parent, keep);
+    const s = sibling(pane);
+    if (!s) return;
+    delete s.parent.Split;
+    Object.assign(s.parent, s.other);
     delete layout.panes[pane];
   } else if ('Swap' in op) {
     const { a, b } = op.Swap;
@@ -85,9 +91,6 @@ function apply(op) {
     if (!la || !lb) return;
     la.Leaf.pane = b;
     lb.Leaf.pane = a;
-  } else if ('Resize' in op) {
-    const node = op.Resize.path.reduce((n, side) => n.Split[side.toLowerCase()], layout.root);
-    node.Split.ratio = op.Resize.ratio;
   } else if ('Change' in op) {
     layout.panes[op.Change.pane].kind = op.Change.kind;
   }
@@ -251,11 +254,8 @@ function bar(id, kind, pane) {
   };
   const split = (axis) => op({ Split: { pane: id, axis, new_pane: freshId(), kind: layout.panes[id].kind } });
   const swap = () => {
-    const parent = findParent(layout.root, id);
-    if (!parent) return;
-    const { a, b } = parent.Split;
-    const other = 'Leaf' in a && a.Leaf.pane === id ? b : a;
-    if ('Leaf' in other) op({ Swap: { a: id, b: other.Leaf.pane } });
+    const s = sibling(id);
+    if (s && 'Leaf' in s.other) op({ Swap: { a: id, b: s.other.Leaf.pane } });
   };
   el.append(select, grow,
     button('|', 'split vertical', () => split('Vertical')),
