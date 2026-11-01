@@ -91,19 +91,13 @@ impl Node {
             return false;
         };
         let keep = if a.is_leaf(pane) {
-            Side::B
+            b
         } else if b.is_leaf(pane) {
-            Side::A
+            a
         } else {
             return a.join(pane) || b.join(pane);
         };
-        let Node::Split { a, b, .. } = std::mem::replace(self, Node::leaf(pane)) else {
-            unreachable!()
-        };
-        *self = match keep {
-            Side::A => *a,
-            Side::B => *b,
-        };
+        *self = std::mem::replace(&mut **keep, Node::leaf(pane));
         true
     }
 }
