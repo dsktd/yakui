@@ -44,8 +44,8 @@ size: [x,y,z], color: "#rrggbb", props?: { [key]: JSON } }`. An unknown
 `kind` draws as a box; editors keep unknown fields untouched.
 
 Private topics: a pane may use any topic under its own prefix
-(`notes/text`, `view3d/camera`), retained or transient as it declares on
-first publish, any shape. Other panes may subscribe to them; the shape is
+(`notes/text`, `view3d/camera`), retained (`retain`) or transient
+(`publish`) per message, any shape. Other panes may subscribe to them; the shape is
 then that pane's documented contract.
 
 Rules: subscribe by name, never by sender. Tolerate a missing or malformed
@@ -70,7 +70,11 @@ on drop, not per pointer move).
 | `move_object`    | `id, position: [x,y,z]`          | `position = position`                                   |
 
 `#[serde(tag = "cmd")]` in Rust; `{ "cmd": "select", "ids": [...] }` on the
-wire. A rejected command changes nothing.
+wire. A rejected command changes nothing. `set_property` refuses `id` and
+`props` as keys (an object's id is fixed; `props` is written one key at a
+time). A message on `cmd` that is not a command at all is logged and
+dropped: `rejected/<pane>` carries the typed command, so there is nothing to
+echo.
 
 ## 3. Widget events
 
@@ -91,13 +95,18 @@ The pane decides what, if anything, to publish for an event.
 
 ```rust
 ctx.bus.subscribe(topic)                    // at new(); retained value arrives first
-ctx.bus.publish(topic, value)               // transient or private retained topics
+ctx.bus.publish(topic, value)               // transient: current subscribers only
+ctx.bus.retain(topic, value)                // private retained topic: kept, persisted
 ctx.bus.command(Command)                    // publish on `cmd`
-fn on_message(&mut self, topic: &str, msg: Value, out: &mut Out<Self::Event>)
+fn on_message(&mut self, topic: &str, msg: Message, out: &mut Out<Self::Event>)
 ```
 
-`on_message` is a trait method with a default no-op, so a pane that never
-subscribes is unchanged. Delivery order per space is arrival order; a slow
+`Message` is `{ value, origin, seq? }`: the value, the id of the host it came
+from, and for a retained message a count per topic and origin, so two hosts'
+copies of a topic can be ordered later. `on_message` is a trait method with
+a default no-op, so a pane that never subscribes is unchanged. The tolerant
+readers in `pane-api::protocol` (`Scene::from_message`, `Protocol::supported`,
+`Rejected::reason`, ...) are how a pane reads a standard topic. Delivery order per space is arrival order; a slow
 pane never blocks the bus (bounded queue; the host logs a drop).
 
 ## 5. Versioning
