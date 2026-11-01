@@ -12,7 +12,7 @@ let ws = null;
 let retry = 500;
 let layout = null;
 let kinds = [];
-const panes = new Map();   // id -> { el, kind, listeners, unmount }
+const panes = new Map();   // id -> { el, kind, listeners, pending, unmount, select }
 const handles = new Map(); // path string -> element
 
 function connect() {
@@ -42,7 +42,10 @@ function receive(frame) {
     return;
   }
   const pane = panes.get(frame.pane_id);
-  if (pane) for (const cb of pane.listeners) cb(frame.payload);
+  if (!pane) return;
+  // The module is still importing: hold its snapshot until it calls onEvent.
+  if (pane.pending) pane.pending.push(frame.payload);
+  else for (const cb of pane.listeners) cb(frame.payload);
 }
 
 // --- layout ops, mirrored from the host so they apply instantly ---
@@ -215,7 +218,7 @@ function place(id, rect, seen) {
 function mount(id, kind) {
   const el = document.createElement('div');
   el.className = only !== null ? 'pane single' : 'pane';
-  const pane = { el, kind, listeners: new Set(), unmount: null, select: null };
+  const pane = { el, kind, listeners: new Set(), pending: [], unmount: null, select: null };
   if (only === null && !ro) el.append(bar(id, kind, pane));
   const body = document.createElement('div');
   body.className = 'body';
@@ -226,12 +229,18 @@ function mount(id, kind) {
   area.append(el);
   const api = {
     send: (payload) => { if (!ro) send({ pane_id: id, payload }); },
-    onEvent: (cb) => { pane.listeners.add(cb); },
+    onEvent: (cb) => {
+      pane.listeners.add(cb);
+      const held = pane.pending || [];
+      pane.pending = null;
+      for (const payload of held) cb(payload);
+    },
   };
   import(`/modules/${kind}`).then((mod) => {
-    if (!panes.has(id) || panes.get(id) !== pane) return;
+    if (panes.get(id) !== pane) return;
     pane.unmount = mod.mount(root, api) || null;
-  }).catch((err) => { root.textContent = String(err); });
+    pane.pending = null;
+  }).catch((err) => { root.textContent = String(err); pane.pending = null; });
   return pane;
 }
 
