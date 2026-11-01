@@ -20,10 +20,40 @@ Non-goals for v1: theming system, plugin marketplace, multi-user editing.
 - Substrate: Tauri shell with web panes.
 - Isolation: in-process Rust trait, compiler-checked.
 - Remote view: required (mobile web, laptop).
-- Layout: shared across clients for v1 (one layout, every full-view client
-  sees the same splits; `/pane/<id>` clients pick a pane and ignore layout).
+- State per client by default, shared on opt-in (2026-10-31, replaces the
+  "one shared layout" of draft 2; see "Spaces").
 - Panes: hybrid (Rust half for durable state, web half for interaction;
   see "Pane authoring").
+
+## Spaces: per-client by default, shared on opt-in
+
+Cal, 2026-10-31: several clients are not a feature of the app, they are how
+a web app is reached. Each client is its own app, but sharing stays
+available as an opt-in.
+
+A **space** is one layout tree plus its pane instances (and their storage,
+`data/<space>/`). The host keeps a map of spaces. Every client belongs to
+exactly one space; a space may have any number of clients. Today's host code
+(fan-out, snapshot on join, correction frames) is the many-clients-per-space
+case and stays as is; the one-client case is the same code with one
+subscriber.
+
+- Identity: the shell generates a random id once and keeps it in
+  `localStorage`; that is its default space. Another browser, another space.
+  A connection is not an identity: a reload or reconnect returns to the same
+  space.
+- Opt-in sharing: the space id is in the URL, `/s/<space>/` and
+  `/s/<space>/pane/<id>` (pane ids are per space). Opening another client's
+  link joins that space; a "share" action in the shell shows the link. `/`
+  redirects to the client's own space, creating it on first visit.
+- Read-only stays a per-connection flag (`?ro=1`), so a shared link can be a
+  passive mirror.
+- The Tauri window is a webview with its own storage, so a separate client
+  (and space) from the desktop browser unless given a link.
+- Later, if wanted: a page listing spaces, renaming, deleting an empty one.
+  Not v1.
+
+Name "space" is a placeholder for Cal to replace.
 
 ## Reconsidered for smoothness
 
