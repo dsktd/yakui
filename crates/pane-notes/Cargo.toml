@@ -1,0 +1,9 @@
+[package]
+name = "pane-notes"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pane-api = { path = "../pane-api" }
+log.workspace = true
+serde.workspace = true
