@@ -80,9 +80,10 @@ function sphere(rings = 12, segments = 16) {
     return [0.5 * Math.sin(phi) * Math.cos(theta), 0.5 * Math.cos(phi), 0.5 * Math.sin(phi) * Math.sin(theta)];
   };
   const v = [];
+  // Counter-clockwise seen from outside, like the cube, so culling keeps the near side.
   for (let i = 0; i < rings; i++) for (let j = 0; j < segments; j++) {
     const a = p(i, j), b = p(i + 1, j), c = p(i + 1, j + 1), d = p(i, j + 1);
-    v.push(...a, ...b, ...c, ...a, ...c, ...d);
+    v.push(...a, ...c, ...b, ...a, ...d, ...c);
   }
   return new Float32Array(v);
 }
@@ -131,6 +132,7 @@ export function mount(root, { send, onEvent }) {
   const program = gl.createProgram();
   gl.attachShader(program, shader(gl.VERTEX_SHADER, VS));
   gl.attachShader(program, shader(gl.FRAGMENT_SHADER, FS));
+  gl.bindAttribLocation(program, 0, 'position');
   gl.linkProgram(program);
   gl.useProgram(program);
   const u = {
