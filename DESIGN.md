@@ -201,39 +201,25 @@ panes. A widget may import another widget. The host does not know widgets
 exist: they are served as static files from the pane or a shared `widgets/`
 directory of the host's web root.
 
-### The document
+### The bus
 
-A space has one **document**: a small key/value store of plain JSON values
-with change notifications, owned by the host, persisted under
-`data/<space>/doc.json`. It is how panes share without knowing each other:
-a viewport writes `selection`, an inspector reads it; both read `scene`.
-
-Pane side (`Ctx`): `ctx.doc.get(key)`, `ctx.doc.set(key, value)`, and a
-`DocChanged { key }` delivery into `Pane::update` for the keys the pane
-subscribed to at `new()`. Keys are strings; values are `serde_json::Value`;
-a set replaces the value whole (no partial patches in v1). Writes are
-serialised per space, broadcast to subscribed panes, then persisted (same
-order as layout: broadcast before save).
-
-Rules: a pane may read and write any key, but by convention owns the keys it
-documents (the 3D viewport owns `scene`, both viewports write `selection`).
-No pane ever holds a reference to another pane; the document is the only
-shared thing, and it is data. A pane must behave sensibly when a key is
-missing (fresh space) or has a shape it does not expect (another pane wrote
-it): ignore, do not panic.
-
-Not v1: undo history, partial patches, conflict handling between two clients
-of one shared space beyond last-write-wins.
+Panes share nothing but a per-space **message bus** addressed by topic:
+`PROTOCOL.md` is the spec (topics, retained vs. transient, commands, widget
+event names). Retained topics are the shared state a late joiner reads;
+transient ones are events. Standard state topics are written only by the
+host on commands, so one validator holds the schema. No pane is ever
+addressed; nothing references another pane. Cal, 2026-11-01: "no direct
+pane-to-pane communication but rather a general message or event bus."
 
 ### Gallery (first set)
 
-Each pane: a Rust half (state it owns, document keys it reads/writes,
+Each pane: a Rust half (state it owns, topics it subscribes to and publishes,
 messages/events) and a web half built from widgets. Each with a short
 README section in its crate stating its boundary: config, msgs, events,
-document keys read/written, widgets used.
+topics subscribed and published, widgets used.
 
 - `pane-view2d`: canvas, pan/zoom, draws the `scene` objects as shapes,
-  click selects (writes `selection`). Widgets: toolbar.
+  click selects (`select` command). Widgets: toolbar.
 - `pane-view3d`: WebGL, orbit camera, same `scene`, click selects. Widgets:
   toolbar.
 - `pane-inspector`: shows the selected object's properties, edits write back
@@ -247,8 +233,8 @@ document keys read/written, widgets used.
 
 Acceptance for the boundary: `cargo tree` still shows only `pane-api` from
 the workspace for every pane; no pane imports another pane's module in JS;
-every widget module has no imports except other widgets; the document
-schema each pane depends on is written down in its README section.
+every widget module has no imports except other widgets; the topics each
+pane depends on are written down in its README section.
 
 ## Future option: WASM panes (parked)
 
