@@ -47,6 +47,17 @@ pub trait Bus: BusStore {
         &self,
         pane: PaneId,
     );
+    /// What `pane` holds on the bus, to put back with [`Bus::restore`] if replacing it fails.
+    fn hold(
+        &self,
+        pane: PaneId,
+    ) -> Held;
+    /// Replace whatever `pane` holds now (a half-built replacement) with `held`.
+    fn restore(
+        &self,
+        pane: PaneId,
+        held: Held,
+    );
     /// Everything queued, in arrival order per pane.
     fn take_queued(&self) -> Vec<(PaneId, String, Message)>;
     /// Record the kind of `pane`, whose prefix is the only private one it may write.
@@ -56,6 +67,13 @@ pub trait Bus: BusStore {
         kind: &str,
     );
     fn save(&self) -> Result<()>;
+}
+
+/// A pane's subscriptions, kind and queued messages, as [`Bus::hold`] saw them.
+pub struct Held {
+    pub(crate) topics: Vec<String>,
+    kind: Option<String>,
+    queue: VecDeque<(String, Message)>,
 }
 
 /// The in-process bus: one mutex, delivery by queue, persistence by file.
@@ -137,6 +155,39 @@ impl Bus for Local {
         }
         bus.queues.remove(&pane);
         bus.kinds.remove(&pane);
+    }
+    fn hold(
+        &self,
+        pane: PaneId,
+    ) -> Held {
+        let bus = self.0.lock().unwrap();
+        Held {
+            topics: bus
+                .subscribers
+                .iter()
+                .filter(|(_topic, panes)| panes.contains(&pane))
+                .map(|(topic, _panes)| topic.clone())
+                .collect(),
+            kind: bus.kinds.get(&pane).cloned(),
+            queue: bus.queues.get(&pane).cloned().unwrap_or_default(),
+        }
+    }
+    fn restore(
+        &self,
+        pane: PaneId,
+        held: Held,
+    ) {
+        self.unsubscribe(pane);
+        let mut bus = self.0.lock().unwrap();
+        for topic in held.topics {
+            bus.subscribers.entry(topic).or_default().insert(pane);
+        }
+        if let Some(kind) = held.kind {
+            bus.kinds.insert(pane, kind);
+        }
+        if !held.queue.is_empty() {
+            bus.queues.insert(pane, held.queue);
+        }
     }
     fn set_kind(
         &self,
