@@ -32,6 +32,9 @@ use crate::Result;
 /// Messages waiting for one pane. Past this the bus drops the newest and logs it.
 const QUEUE: usize = 256;
 
+/// The most a retained value may take as JSON, so a pane cannot fill bus.json.
+const MAX_RETAINED: usize = 256 * 1024;
+
 /// What a space needs of its bus, beyond what panes see. [`Local`] is the only
 /// implementation; one that gossips with other hosts would be another.
 pub trait Bus: BusStore {
@@ -187,7 +190,11 @@ impl BusStore for Local {
             return;
         }
         let kind = bus.kinds.get(&pane).map(String::as_str);
-        if let Err(err) = check_topic(kind, topic, retain) {
+        let checked = check_topic(kind, topic, retain).and_then(|()| match retain {
+            true => check_size(&value),
+            false => Ok(()),
+        });
+        if let Err(err) = checked {
             bus.refuse(pane, topic, &err);
             return;
         }
@@ -293,24 +300,24 @@ impl LocalInner {
     fn retain_scene(
         &mut self,
         scene: &Scene,
-    ) {
-        self.publish(
-            None,
-            Topic::SCENE,
-            serde_json::to_value(scene).unwrap(),
-            true,
-        );
+    ) -> Result<()> {
+        self.retain_checked(Topic::SCENE, serde_json::to_value(scene).unwrap())
     }
     fn retain_selection(
         &mut self,
         selection: &Selection,
-    ) {
-        self.publish(
-            None,
-            Topic::SELECTION,
-            serde_json::to_value(selection).unwrap(),
-            true,
-        );
+    ) -> Result<()> {
+        self.retain_checked(Topic::SELECTION, serde_json::to_value(selection).unwrap())
+    }
+    /// Retain a standard topic's new value, unless it is too big to keep.
+    fn retain_checked(
+        &mut self,
+        topic: &str,
+        value: Value,
+    ) -> Result<()> {
+        check_size(&value)?;
+        self.publish(None, topic, value, true);
+        Ok(())
     }
     /// Validate first, then publish every topic the command touches, so a rejected command
     /// changes nothing.
@@ -330,7 +337,7 @@ impl LocalInner {
                         selection.ids.push(id.clone());
                     }
                 }
-                self.retain_selection(&selection);
+                self.retain_selection(&selection)?;
             }
             Command::AddObject { object } => {
                 let mut scene = self.scene()?;
@@ -342,7 +349,7 @@ impl LocalInner {
                 }
                 check_object(&object)?;
                 scene.objects.push(object);
-                self.retain_scene(&scene);
+                self.retain_scene(&scene)?;
             }
             Command::RemoveObjects { ids } => {
                 let mut scene = self.scene()?;
@@ -357,8 +364,8 @@ impl LocalInner {
                     None => Selection::default(),
                 };
                 selection.ids.retain(|id| !ids.contains(id));
-                self.retain_scene(&scene);
-                self.retain_selection(&selection);
+                self.retain_scene(&scene)?;
+                self.retain_selection(&selection)?;
             }
             Command::SetProperty { id, key, value } => {
                 let mut scene = self.scene()?;
@@ -368,7 +375,7 @@ impl LocalInner {
                     .find(|object| object.id == *id)
                     .ok_or(anyhow!("No object {id}"))?;
                 set_property(object, key, value)?;
-                self.retain_scene(&scene);
+                self.retain_scene(&scene)?;
             }
             Command::MoveObject { id, position } => {
                 let mut scene = self.scene()?;
@@ -379,7 +386,7 @@ impl LocalInner {
                     .ok_or(anyhow!("No object {id}"))?;
                 check_vector(position)?;
                 object.position = *position;
-                self.retain_scene(&scene);
+                self.retain_scene(&scene)?;
             }
         }
         Ok(())
@@ -406,6 +413,16 @@ fn check_topic(
         Some(name) if !name.is_empty() => Ok(()),
         _ => Err(anyhow!("A pane writes only its own {kind:?}/<name> topics")),
     }
+}
+
+fn check_size(value: &Value) -> Result<()> {
+    let size = value.to_string().len();
+    if size > MAX_RETAINED {
+        return Err(anyhow!(
+            "A retained value takes {size} bytes, over {MAX_RETAINED}"
+        ));
+    }
+    Ok(())
 }
 
 fn fresh_id(scene: &Scene) -> String {
@@ -643,6 +660,52 @@ mod test {
         assert_eq!(queued[0].2.value["topic"], json!("clock/text"));
         assert!(queued[0].2.value["reason"].is_string());
         assert_eq!(bus.retained("clock/text"), None);
+    }
+
+    #[test]
+    fn test_check_size() {
+        // A string is its length plus two quotes.
+        assert!(check_size(&json!("x".repeat(MAX_RETAINED - 2))).is_ok());
+        assert!(check_size(&json!("x".repeat(MAX_RETAINED - 1))).is_err());
+    }
+
+    #[test]
+    fn test_oversized_writes() {
+        let bus = open(&tmp());
+        bus.set_kind(pid(1), "notes");
+        let rejected = Topic::rejected(pid(1));
+        bus.subscribe(pid(1), &rejected);
+        let big = json!("x".repeat(MAX_RETAINED));
+        bus.publish(pid(1), "notes/text", big.clone(), true);
+        assert_eq!(bus.retained("notes/text"), None);
+        // Transient messages are not kept, so size does not matter.
+        bus.subscribe(pid(2), "notes/text");
+        bus.publish(pid(1), "notes/text", big, false);
+        let queued = bus.take_queued();
+        assert_eq!(
+            topics(&queued),
+            vec![
+                (1, "rejected/00000000000000000000000000000abc-1"),
+                (2, "notes/text")
+            ]
+        );
+        // A command whose scene would be too big is rejected whole.
+        let mut fat = object("a", "#ff0000");
+        fat.props
+            .insert("blob".to_owned(), json!("x".repeat(MAX_RETAINED)));
+        command(&bus, pid(1), Command::AddObject { object: fat });
+        assert_eq!(bus.retained(Topic::SCENE), None);
+        let queued = bus.take_queued();
+        assert_eq!(
+            topics(&queued),
+            vec![(1, "rejected/00000000000000000000000000000abc-1")]
+        );
+        assert!(
+            queued[0].2.value["reason"]
+                .as_str()
+                .unwrap()
+                .contains("over")
+        );
     }
 
     #[test]

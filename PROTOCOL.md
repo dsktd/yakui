@@ -49,7 +49,8 @@ Private topics: a pane may use any topic under its own prefix
 then that pane's documented contract. A pane may publish only the standard transient
 topics and its own prefix; any other write (another pane's prefix, a standard retained
 topic, an empty or malformed name) is dropped, and the host answers `rejected/<pane>` with
-`{ "topic", "reason" }`.
+`{ "topic", "reason" }`. A retained value over 256 KiB as JSON is refused the same way
+(a command that would make `scene` or `selection` that big is rejected).
 
 Rules: subscribe by name, never by sender. Tolerate a missing or malformed
 message (ignore it, never panic, never "repair" a topic you do not own).
