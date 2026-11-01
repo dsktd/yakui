@@ -2,6 +2,7 @@
 // the object comes back through the scene, so nothing here is state of its own.
 import { mount as propertyList } from '../widgets/property-list.js';
 import { Emits } from '../protocol.js';
+import { flash } from '../note.js';
 
 export function mount(root, { send, onEvent }) {
   root.innerHTML = `<style>
@@ -12,12 +13,6 @@ export function mount(root, { send, onEvent }) {
   const head = root.querySelector('.head');
   const note = root.querySelector('.note');
   let object = null;
-  let noteTimer = null;
-  const flash = (text) => {
-    note.textContent = text;
-    clearTimeout(noteTimer);
-    noteTimer = setTimeout(() => { note.textContent = ''; }, 2500);
-  };
 
   const rows = (o) => {
     if (!o) return [];
@@ -66,11 +61,8 @@ export function mount(root, { send, onEvent }) {
         head.querySelector('span').textContent = object.id;
       }
       list.update({ rows: rows(object) });
-    } else if (e.Rejected) flash(e.Rejected.reason);
-    else if (e.Unsupported) flash(`protocol version ${JSON.stringify(e.Unsupported.version)} is not one this pane knows`);
+    } else if (e.Rejected) flash(note, e.Rejected.reason);
+    else if (e.Unsupported) flash(note, `protocol version ${JSON.stringify(e.Unsupported.version)} is not one this pane knows`);
   });
-  return () => {
-    list.destroy();
-    clearTimeout(noteTimer);
-  };
+  return () => list.destroy();
 }

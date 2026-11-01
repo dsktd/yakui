@@ -2,6 +2,7 @@
 // Focus, the pointer coming onto or leaving an object a Hover; group rows do nothing.
 import { mount as tree } from '../widgets/tree.js';
 import { Emits } from '../protocol.js';
+import { flash } from '../note.js';
 
 export function mount(root, { send, onEvent }) {
   root.innerHTML = `<style>
@@ -12,12 +13,6 @@ export function mount(root, { send, onEvent }) {
   let selected = [];
   let hovered = null;
   let sentHover = null;
-  let noteTimer = null;
-  const flash = (text) => {
-    note.textContent = text;
-    clearTimeout(noteTimer);
-    noteTimer = setTimeout(() => { note.textContent = ''; }, 2500);
-  };
   const isObject = (id) => objects.some((o) => o.id === id);
 
   const nodes = () => {
@@ -53,12 +48,9 @@ export function mount(root, { send, onEvent }) {
       objects = e.State.scene?.objects ?? [];
       selected = e.State.selection?.ids ?? [];
     } else if (e.Hover) hovered = e.Hover.hover?.id ?? null;
-    else if (e.Rejected) flash(e.Rejected.reason);
-    else if (e.Unsupported) flash(`protocol version ${JSON.stringify(e.Unsupported.version)} is not one this pane knows`);
+    else if (e.Rejected) flash(note, e.Rejected.reason);
+    else if (e.Unsupported) flash(note, `protocol version ${JSON.stringify(e.Unsupported.version)} is not one this pane knows`);
     render();
   });
-  return () => {
-    widget.destroy();
-    clearTimeout(noteTimer);
-  };
+  return () => widget.destroy();
 }
