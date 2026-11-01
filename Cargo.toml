@@ -9,6 +9,14 @@ members = [
 	"crates/pane-api",
 	"crates/pane-clock",
 	"crates/pane-notes",
+	"crates/shell-tauri",
+]
+# shell-tauri needs webkitgtk; build it on purpose with -p shell-tauri.
+default-members = [
+	"crates/host",
+	"crates/pane-api",
+	"crates/pane-clock",
+	"crates/pane-notes",
 ]
 
 [workspace.dependencies]
