@@ -236,6 +236,27 @@ the workspace for every pane; no pane imports another pane's module in JS;
 every widget module has no imports except other widgets; the topics each
 pane depends on are written down in its README section.
 
+Built 2026-11-01, as PROTOCOL.md says, with these choices:
+
+- The scene schema is PROTOCOL.md's: `scene = { objects: [Object] }`,
+  `Object = { id, name, kind, position: [x,y,z], size: [x,y,z], color:
+  "#rrggbb", props? }`; view2d shows the x/y plane (y up), view3d the same
+  scene with an orbit camera. Panes read it with the tolerant readers in
+  `pane-api::protocol` (a bad object is skipped, a bad topic reads as empty).
+- Seeding: a viewport subscribes `scene` before `protocol`, so when the
+  retained `protocol` arrives without a `scene` before it the space is fresh
+  and the viewport publishes four `add_object` commands with fixed ids; a
+  second viewport seeding at the same moment is refused object by object.
+- Private retained topics: `view2d/view` (`{ x, y, zoom }`) and
+  `view3d/camera` (`{ yaw, pitch, distance, target }`), one per space, so a
+  reload or another client sees the same view.
+- `pane-api::Bus` is `subscribe`, `publish` (transient), `retain` (private
+  retained) and `command`; the trait method is `on_message(topic, Message)`,
+  where `Message` is the value plus its `origin` host and, if retained, its
+  `seq`. The host's bus is a trait (`host::bus::Bus`) with one in-process
+  implementation, and pane ids are `<host>-<n>`, so another transport can
+  come later without touching panes.
+
 ## Future option: WASM panes (parked)
 
 Cal wants this kept in mind in case the project pivots toward untrusted or
