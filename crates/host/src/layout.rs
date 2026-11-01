@@ -245,12 +245,18 @@ impl Layout {
 
 #[cfg(test)]
 mod test {
+    use pane_api::HostId;
+
     use super::*;
 
+    fn pid(local: u32) -> PaneId {
+        PaneId::new(HostId(1), local)
+    }
+
     fn two() -> Layout {
-        let mut layout = Layout::single(PaneId(1), "clock");
+        let mut layout = Layout::single(pid(1), "clock");
         layout
-            .split(PaneId(1), Axis::Vertical, PaneId(2), "notes")
+            .split(pid(1), Axis::Vertical, pid(2), "notes")
             .unwrap();
         layout
     }
@@ -258,40 +264,32 @@ mod test {
     #[test]
     fn test_split() {
         let layout = two();
-        assert_eq!(layout.leaves(), vec![PaneId(1), PaneId(2)]);
-        assert_eq!(layout.panes[&PaneId(2)].kind, "notes");
-        assert!(
-            two()
-                .split(PaneId(1), Axis::Vertical, PaneId(2), "x")
-                .is_err()
-        );
-        assert!(
-            two()
-                .split(PaneId(9), Axis::Vertical, PaneId(3), "x")
-                .is_err()
-        );
+        assert_eq!(layout.leaves(), vec![pid(1), pid(2)]);
+        assert_eq!(layout.panes[&pid(2)].kind, "notes");
+        assert!(two().split(pid(1), Axis::Vertical, pid(2), "x").is_err());
+        assert!(two().split(pid(9), Axis::Vertical, pid(3), "x").is_err());
     }
 
     #[test]
     fn test_join() {
         let mut layout = two();
         layout
-            .split(PaneId(2), Axis::Horizontal, PaneId(3), "clock")
+            .split(pid(2), Axis::Horizontal, pid(3), "clock")
             .unwrap();
-        layout.join(PaneId(2)).unwrap();
-        assert_eq!(layout.leaves(), vec![PaneId(1), PaneId(3)]);
-        assert!(!layout.panes.contains_key(&PaneId(2)));
-        layout.join(PaneId(1)).unwrap();
-        assert_eq!(layout.root, Node::leaf(PaneId(3)));
-        assert!(layout.join(PaneId(3)).is_err());
+        layout.join(pid(2)).unwrap();
+        assert_eq!(layout.leaves(), vec![pid(1), pid(3)]);
+        assert!(!layout.panes.contains_key(&pid(2)));
+        layout.join(pid(1)).unwrap();
+        assert_eq!(layout.root, Node::leaf(pid(3)));
+        assert!(layout.join(pid(3)).is_err());
     }
 
     #[test]
     fn test_swap() {
         let mut layout = two();
-        layout.swap(PaneId(1), PaneId(2)).unwrap();
-        assert_eq!(layout.leaves(), vec![PaneId(2), PaneId(1)]);
-        assert!(layout.swap(PaneId(1), PaneId(7)).is_err());
+        layout.swap(pid(1), pid(2)).unwrap();
+        assert_eq!(layout.leaves(), vec![pid(2), pid(1)]);
+        assert!(layout.swap(pid(1), pid(7)).is_err());
     }
 
     #[test]

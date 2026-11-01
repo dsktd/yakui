@@ -4,9 +4,10 @@
 // Every URL derives from where this module was served, so a proxy may mount the host under any prefix.
 const base = new URL('.', import.meta.url);
 // `/s/<space>/` or `/s/<space>/pane/<id>`; anything else is the root, which goes to this browser's own space.
-const at = location.pathname.match(/\/s\/([a-z0-9]+)\/(?:pane\/(\d+))?$/);
+// A pane id is `<host>-<n>`: the host that made it and a number unique there.
+const at = location.pathname.match(/\/s\/([a-z0-9]+)\/(?:pane\/([a-z0-9]+-\d+|\d+))?$/);
 const space = at ? at[1] : null;
-const only = at && at[2] ? Number(at[2]) : null;
+const only = at && at[2] ? at[2] : null;
 const roParam = new URLSearchParams(location.search).get('ro');
 const ro = roParam !== null && roParam !== '0' && roParam !== 'false';
 const strip = document.getElementById('strip');
@@ -16,6 +17,7 @@ let ws = null;
 let retry = 500;
 let layout = null;
 let kinds = [];
+let host = null;
 const panes = new Map();   // id -> { el, kind, listeners, pending, unmount, select }
 const handles = new Map(); // path string -> element
 
@@ -77,6 +79,7 @@ function receive(frame) {
   if ('layout' in frame) {
     layout = frame.layout;
     kinds = frame.kinds;
+    host = frame.host;
     render();
     return;
   }
@@ -147,7 +150,7 @@ function op(o) {
 
 function freshId() {
   let id;
-  do { id = crypto.getRandomValues(new Uint32Array(1))[0]; } while (id === 0 || layout.panes[id]);
+  do { id = `${host}-${crypto.getRandomValues(new Uint32Array(1))[0]}`; } while (layout.panes[id]);
   return id;
 }
 

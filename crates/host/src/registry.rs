@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use pane_api::Ctx;
+use pane_api::Message;
 use pane_api::Out;
 use pane_api::Pane;
 use serde_json::Value;
@@ -14,6 +15,11 @@ pub trait AnyPane: Send {
         &mut self,
         msg: Value,
     ) -> Result<Vec<Value>>;
+    fn on_message(
+        &mut self,
+        topic: &str,
+        msg: Message,
+    ) -> Result<Vec<Value>>;
     fn snapshot(&self) -> Value;
 }
 impl<P: Pane> AnyPane for P {
@@ -24,15 +30,28 @@ impl<P: Pane> AnyPane for P {
         let msg = serde_json::from_value(msg)?;
         let mut out = Out::new();
         P::update(self, msg, &mut out);
-        let mut events = Vec::with_capacity(out.events.len());
-        for event in out.events {
-            events.push(serde_json::to_value(event)?);
-        }
-        Ok(events)
+        events(out)
+    }
+    fn on_message(
+        &mut self,
+        topic: &str,
+        msg: Message,
+    ) -> Result<Vec<Value>> {
+        let mut out = Out::new();
+        P::on_message(self, topic, msg, &mut out);
+        events(out)
     }
     fn snapshot(&self) -> Value {
         serde_json::to_value(P::snapshot(self)).unwrap()
     }
+}
+
+fn events<E: serde::Serialize>(out: Out<E>) -> Result<Vec<Value>> {
+    let mut events = Vec::with_capacity(out.events.len());
+    for event in out.events {
+        events.push(serde_json::to_value(event)?);
+    }
+    Ok(events)
 }
 
 type Make = fn(Value, Ctx) -> Result<Box<dyn AnyPane>>;
