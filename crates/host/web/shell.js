@@ -20,12 +20,14 @@ const panes = new Map();   // id -> { el, kind, listeners, pending, unmount, sel
 const handles = new Map(); // path string -> element
 
 // The id is made once per browser and kept; a reload or another tab lands in the same space.
+// Without storage (disabled, or a sandboxed page) the id lasts for this visit only.
 function home() {
-  let id = localStorage.getItem('space');
-  if (!id) {
+  let id = null;
+  try { id = localStorage.getItem('space'); } catch {}
+  if (!/^[a-z0-9]{16,64}$/.test(id)) {
     const bytes = crypto.getRandomValues(new Uint8Array(16));
     id = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-    localStorage.setItem('space', id);
+    try { localStorage.setItem('space', id); } catch {}
   }
   location.replace(new URL(`s/${id}/`, base));
 }
