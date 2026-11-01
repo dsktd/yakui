@@ -116,7 +116,7 @@ impl Space {
         };
         let mut panes = HashMap::new();
         for (id, entry) in &layout.panes {
-            let ctx = ctx(&dir, &bus, *id);
+            let ctx = ctx(&dir, &bus, *id, &entry.kind);
             panes.insert(*id, registry.make(&entry.kind, entry.config.clone(), ctx)?);
         }
         info!("{} panes from {}", panes.len(), path.display());
@@ -238,7 +238,7 @@ impl SpaceInner {
         id: PaneId,
     ) -> Result<Box<dyn AnyPane>> {
         self.registry
-            .make(kind, Value::Null, ctx(&self.dir, &self.bus, id))
+            .make(kind, Value::Null, ctx(&self.dir, &self.bus, id, kind))
     }
     /// Deliver what the last update put on the bus to the panes subscribed, fan out what
     /// they emit, then save the retained topics. A pane hearing a message may publish
@@ -289,7 +289,9 @@ fn ctx(
     dir: &Path,
     bus: &Arc<dyn Bus>,
     id: PaneId,
+    kind: &str,
 ) -> Ctx {
+    bus.set_kind(id, kind);
     Ctx {
         id,
         storage: dir.join("panes").join(id.to_string()),

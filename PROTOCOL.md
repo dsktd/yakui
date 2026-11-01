@@ -46,7 +46,10 @@ size: [x,y,z], color: "#rrggbb", props?: { [key]: JSON } }`. An unknown
 Private topics: a pane may use any topic under its own prefix
 (`notes/text`, `view3d/camera`), retained (`retain`) or transient
 (`publish`) per message, any shape. Other panes may subscribe to them; the shape is
-then that pane's documented contract.
+then that pane's documented contract. A pane may publish only the standard transient
+topics and its own prefix; any other write (another pane's prefix, a standard retained
+topic, an empty or malformed name) is dropped, and the host answers `rejected/<pane>` with
+`{ "topic", "reason" }`.
 
 Rules: subscribe by name, never by sender. Tolerate a missing or malformed
 message (ignore it, never panic, never "repair" a topic you do not own).

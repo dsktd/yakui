@@ -46,6 +46,12 @@ pub trait Bus: BusStore {
     );
     /// Everything queued, in arrival order per pane.
     fn take_queued(&self) -> Vec<(PaneId, String, Message)>;
+    /// Record the kind of `pane`, whose prefix is the only private one it may write.
+    fn set_kind(
+        &self,
+        pane: PaneId,
+        kind: &str,
+    );
     fn save(&self) -> Result<()>;
 }
 
@@ -56,6 +62,7 @@ struct LocalInner {
     origin: HostId,
     retained: BTreeMap<String, Message>,
     subscribers: BTreeMap<String, BTreeSet<PaneId>>,
+    kinds: BTreeMap<PaneId, String>,
     queues: BTreeMap<PaneId, VecDeque<(String, Message)>>,
     path: PathBuf,
     dirty: bool,
@@ -86,6 +93,7 @@ impl Local {
             origin,
             retained,
             subscribers: BTreeMap::new(),
+            kinds: BTreeMap::new(),
             queues: BTreeMap::new(),
             path,
             dirty: false,
@@ -116,6 +124,14 @@ impl Bus for Local {
             panes.remove(&pane);
         }
         bus.queues.remove(&pane);
+        bus.kinds.remove(&pane);
+    }
+    fn set_kind(
+        &self,
+        pane: PaneId,
+        kind: &str,
+    ) {
+        self.0.lock().unwrap().kinds.insert(pane, kind.to_owned());
     }
     fn take_queued(&self) -> Vec<(PaneId, String, Message)> {
         let mut bus = self.0.lock().unwrap();
@@ -170,12 +186,9 @@ impl BusStore for Local {
             bus.command(pane, value);
             return;
         }
-        if Topic::is_standard(topic) && (retain || Topic::RETAINED.contains(&topic)) {
-            warn!("pane {pane} may not retain {topic}, dropped");
-            return;
-        }
-        if topic.starts_with("rejected/") {
-            warn!("pane {pane} may not publish {topic}, dropped");
+        let kind = bus.kinds.get(&pane).map(String::as_str);
+        if let Err(err) = check_topic(kind, topic, retain) {
+            bus.refuse(pane, topic, &err);
             return;
         }
         bus.publish(Some(pane), topic, value, retain);
@@ -232,6 +245,17 @@ impl LocalInner {
         for pane in panes {
             self.enqueue(pane, topic, msg.clone());
         }
+    }
+    /// Drop a write of `pane` to `topic`: say why on `rejected/<pane>` and in the log.
+    fn refuse(
+        &mut self,
+        pane: PaneId,
+        topic: &str,
+        err: &anyhow::Error,
+    ) {
+        warn!("pane {pane} may not write {topic:?}: {err}");
+        let value = json!({ "topic": topic, "reason": err.to_string() });
+        self.publish(None, &Topic::rejected(pane), value, false);
     }
     /// Apply a command from `pane`, or answer it on `rejected/<pane>`.
     fn command(
@@ -359,6 +383,28 @@ impl LocalInner {
             }
         }
         Ok(())
+    }
+}
+
+/// What a pane of `kind` may publish, or retain if `retain`: the standard transient topics
+/// (not retained) and `<kind>/<name>`.
+fn check_topic(
+    kind: Option<&str>,
+    topic: &str,
+    retain: bool,
+) -> Result<()> {
+    if Topic::TRANSIENT.contains(&topic) {
+        if retain {
+            return Err(anyhow!("{topic} is transient, it cannot be retained"));
+        }
+        return Ok(());
+    }
+    let name = kind
+        .and_then(|kind| topic.strip_prefix(kind))
+        .and_then(|rest| rest.strip_prefix('/'));
+    match name {
+        Some(name) if !name.is_empty() => Ok(()),
+        _ => Err(anyhow!("A pane writes only its own {kind:?}/<name> topics")),
     }
 }
 
@@ -522,6 +568,7 @@ mod test {
     #[test]
     fn test_private_and_standard_topics() {
         let bus = open(&tmp());
+        bus.set_kind(pid(1), "view3d");
         bus.subscribe(pid(2), "view3d/camera");
         bus.publish(pid(1), "view3d/camera", json!({ "yaw": 1 }), true);
         bus.publish(pid(1), "view3d/camera", json!({ "yaw": 1 }), true);
@@ -553,6 +600,49 @@ mod test {
         bus.publish(pid(1), "rejected/2", json!("nope"), false);
         assert!(bus.take_queued().is_empty());
         assert_eq!(bus.retained(Topic::SCENE), None);
+    }
+
+    #[test]
+    fn test_check_topic() {
+        let ok = |kind, topic, retain| check_topic(kind, topic, retain).is_ok();
+        // Standard transient topics, not retained; private ones under the own prefix.
+        assert!(ok(Some("notes"), "hover", false));
+        assert!(ok(Some("notes"), "tool", false));
+        assert!(ok(Some("notes"), "focus", false));
+        assert!(ok(Some("notes"), "notes/text", true));
+        assert!(ok(Some("notes"), "notes/text", false));
+        assert!(ok(Some("notes"), "notes/a/b", true));
+        assert!(!ok(Some("notes"), "hover", true));
+        // Another pane's prefix, a prefix that is only a string prefix, a standard retained
+        // topic, a rejection, empty and malformed names, a pane of no known kind.
+        assert!(!ok(Some("notes"), "clock/text", true));
+        assert!(!ok(Some("notes"), "notesy/text", true));
+        assert!(!ok(Some("notes"), "scene", false));
+        assert!(!ok(Some("notes"), "selection", true));
+        assert!(!ok(Some("notes"), "protocol", false));
+        assert!(!ok(Some("notes"), "rejected/1", false));
+        assert!(!ok(Some("notes"), "", false));
+        assert!(!ok(Some("notes"), "notes", true));
+        assert!(!ok(Some("notes"), "notes/", true));
+        assert!(!ok(Some("notes"), "/text", true));
+        assert!(!ok(None, "notes/text", true));
+    }
+
+    #[test]
+    fn test_refused_write() {
+        let bus = open(&tmp());
+        bus.set_kind(pid(1), "notes");
+        bus.subscribe(pid(1), &Topic::rejected(pid(1)));
+        bus.subscribe(pid(2), "clock/text");
+        bus.publish(pid(1), "clock/text", json!("x"), true);
+        let queued = bus.take_queued();
+        assert_eq!(
+            topics(&queued),
+            vec![(1, "rejected/00000000000000000000000000000abc-1")]
+        );
+        assert_eq!(queued[0].2.value["topic"], json!("clock/text"));
+        assert!(queued[0].2.value["reason"].is_string());
+        assert_eq!(bus.retained("clock/text"), None);
     }
 
     #[test]
@@ -675,6 +765,7 @@ mod test {
     fn test_persist() {
         let path = tmp();
         let bus = open(&path);
+        bus.set_kind(pid(1), "view2d");
         add(&bus, "a");
         bus.publish(pid(1), Topic::HOVER, json!({ "id": "a" }), false);
         bus.publish(pid(1), "view2d/view", json!({ "zoom": 2 }), true);
@@ -691,6 +782,7 @@ mod test {
         assert_eq!(view.origin, HOST);
         assert_eq!(again.retained(Topic::HOVER), None);
         // The count goes on from the file.
+        again.set_kind(pid(1), "view2d");
         again.publish(pid(1), "view2d/view", json!({ "zoom": 3 }), true);
         assert_eq!(again.retained("view2d/view").unwrap().seq, Some(2));
         // Nothing dirty: saving again leaves the file alone.
