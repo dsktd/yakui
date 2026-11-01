@@ -12,6 +12,10 @@ html, body { margin: 0; height: 100%; background: #111; color: #ddd;
 .bar .grow { flex: 1; }
 .body { position: absolute; inset: 24px 2px 2px 2px; contain: strict; background: #1e1e1e; }
 .pane.single .body { inset: 0; }
+#share { position: fixed; right: 6px; bottom: 6px; z-index: 6; display: flex; gap: 4px; }
+#share button, #share input { font: inherit; background: #444; color: #ddd; border: 0;
+                              border-radius: 2px; padding: 1px 5px; }
+#share input { width: 28em; max-width: 70vw; }
 .handle { position: absolute; z-index: 5; touch-action: none; }
 .handle.v { width: 8px; margin-left: -4px; cursor: col-resize; }
 .handle.h { height: 8px; margin-top: -4px; cursor: row-resize; }

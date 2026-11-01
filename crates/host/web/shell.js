@@ -30,6 +30,23 @@ function home() {
   location.replace(new URL(`s/${id}/`, base));
 }
 
+// The space's link, to hand to another client; copied too where the browser allows it.
+function share() {
+  const box = document.getElementById('share');
+  const [input, button] = box.children;
+  input.value = new URL(`s/${space}/`, base).href;
+  button.onclick = () => {
+    input.hidden = !input.hidden;
+    if (input.hidden) return;
+    input.select();
+    navigator.clipboard?.writeText(input.value).then(() => {
+      button.textContent = 'copied';
+      setTimeout(() => { button.textContent = 'share'; }, 1500);
+    }, () => {});
+  };
+  box.hidden = false;
+}
+
 function connect() {
   const q = new URLSearchParams();
   q.set('space', space);
@@ -293,4 +310,7 @@ function bar(id, kind, pane) {
 }
 
 if (space === null) home();
-else connect();
+else {
+  if (only === null) share();
+  connect();
+}
