@@ -3,6 +3,7 @@
 // message per click, hover change and camera at rest.
 import { mount as toolbar } from '../widgets/toolbar.js';
 import { Emits, Kind, isColor } from '../protocol.js';
+import { flash } from '../note.js';
 
 const VS = `#version 300 es
 in vec3 position;
@@ -111,16 +112,10 @@ export function mount(root, { send, onEvent }) {
   let drag = null; // { start, from, moved }
   let frame = null;
   let cameraTimer = null;
-  let noteTimer = null;
   let pendingHover = null;
 
   const num = (v, d) => (Number.isFinite(v) ? v : d);
   const vec = (v, d) => (Array.isArray(v) ? [num(v[0], d), num(v[1], d), num(v[2], d)] : [d, d, d]);
-  const flash = (text) => {
-    note.textContent = text;
-    clearTimeout(noteTimer);
-    noteTimer = setTimeout(() => { note.textContent = ''; }, 2500);
-  };
 
   // --- GL setup ---
   const shader = (type, source) => {
@@ -309,8 +304,8 @@ export function mount(root, { send, onEvent }) {
       }
     } else if (e.Camera) {
       if (!drag && cameraTimer === null) applyCamera(e.Camera.camera);
-    } else if (e.Rejected) flash(e.Rejected.reason);
-    else if (e.Unsupported) flash(`protocol version ${JSON.stringify(e.Unsupported.version)} is not one this pane knows`);
+    } else if (e.Rejected) flash(note, e.Rejected.reason);
+    else if (e.Unsupported) flash(note, `protocol version ${JSON.stringify(e.Unsupported.version)} is not one this pane knows`);
     draw();
   });
 
@@ -322,6 +317,5 @@ export function mount(root, { send, onEvent }) {
     tools.destroy();
     if (frame !== null) cancelAnimationFrame(frame);
     clearTimeout(cameraTimer);
-    clearTimeout(noteTimer);
   };
 }

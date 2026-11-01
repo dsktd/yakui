@@ -214,12 +214,23 @@ impl Space {
                 if !space.registry.kinds().contains(&kind.as_str()) {
                     return Err(anyhow!("Unknown pane kind {kind}"));
                 }
-                // Before `make`, which subscribes the new pane under the same id.
+                // The new pane subscribes under the same id, so the old one's subscriptions
+                // go first; if anything fails they come back and the old pane stays.
+                let held = space.bus.hold(pane);
                 space.bus.unsubscribe(pane);
-                let p = space.make(&kind, pane)?;
-                space.layout.change(pane, kind)?;
-                space.panes.insert(pane, p);
-                Some(pane)
+                let built = space
+                    .make(&kind, pane)
+                    .and_then(|p| space.layout.change(pane, kind).map(|()| p));
+                match built {
+                    Ok(p) => {
+                        space.panes.insert(pane, p);
+                        Some(pane)
+                    }
+                    Err(err) => {
+                        space.bus.restore(pane, held);
+                        return Err(err);
+                    }
+                }
             }
         };
         let _ = space.tx.send(space.layout_frame());
@@ -334,5 +345,46 @@ mod test {
         assert!("abcdefghijklmnöp".parse::<SpaceId>().is_err());
         assert!(SpaceId::random().as_str().parse::<SpaceId>().is_ok());
         assert_ne!(SpaceId::random(), SpaceId::random());
+    }
+
+    #[test]
+    fn test_change_failure_keeps_old_pane() {
+        let dir = std::env::temp_dir().join(format!("yakui-space-{:08x}", rand::random::<u32>()));
+        let host = HostId(0xabc);
+        let mut registry = Registry::default();
+        registry.add::<pane_clock::Clock>();
+        registry.add::<pane_inspector::Inspector>();
+        registry.add::<pane_notes::Notes>();
+        let space = Space::open(&dir, registry, host).unwrap();
+        let one = PaneId::new(host, 1);
+        let three = PaneId::new(host, 3);
+        space
+            .apply(Op::Split {
+                pane: one,
+                axis: Axis::Vertical,
+                new_pane: three,
+                kind: "inspector".to_owned(),
+            })
+            .unwrap();
+        let topics_of = |pane| space.0.lock().unwrap().bus.hold(pane).topics;
+        let before = topics_of(three);
+        assert!(!before.is_empty());
+
+        // A file where the new pane's storage dir must go: `make` fails after the checks.
+        let storage = dir.join("panes").join(three.to_string());
+        std::fs::remove_dir_all(&storage).unwrap();
+        std::fs::write(&storage, b"").unwrap();
+        let change = Op::Change {
+            pane: three,
+            kind: "clock".to_owned(),
+        };
+        assert!(space.apply(change).is_err());
+
+        assert_eq!(topics_of(three), before);
+        let inner = space.0.lock().unwrap();
+        assert!(inner.panes.contains_key(&three));
+        assert_eq!(inner.layout.panes[&three].kind, "inspector");
+        drop(inner);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -27,16 +27,18 @@ export function mount(root) {
     log.prepend(line);
     while (log.childElementCount > 50) log.lastChild.remove();
   };
-  // A card holds one widget; `react` gets (name, payload, update) to feed a value back.
+  // A card holds one widget; `react` gets (name, payload, update, current) to feed a value
+  // back; update merges into the widget's current props, not the first ones.
   const card = (title, mountFn, props, react) => {
     const el = root.ownerDocument.createElement('div');
     el.className = 'card';
     el.innerHTML = '<h3></h3><div></div>';
     el.querySelector('h3').textContent = title;
     cards.append(el);
+    let current = props;
     const widget = mountFn(el.lastChild, props, (name, payload) => {
       say(title, name, payload);
-      react?.(name, payload, (next) => widget.update({ ...props, ...next }));
+      react?.(name, payload, (next) => widget.update((current = { ...current, ...next })), current);
     });
     widgets.push(widget);
   };
@@ -57,9 +59,9 @@ export function mount(root) {
     { key: 'weight', label: 'weight', kind: 'number', value: 2.5, step: 0.5 },
     { key: 'color', label: 'colour', kind: 'color', value: '#3a8ee0' },
   ];
-  card('property-list', propertyList, { rows }, (name, { key, value }, update) => {
+  card('property-list', propertyList, { rows }, (name, { key, value }, update, current) => {
     if (name !== Emits.CHANGE) return;
-    update({ rows: rows.map((r) => (r.key === key ? { ...r, value } : r)) });
+    update({ rows: current.rows.map((r) => (r.key === key ? { ...r, value } : r)) });
   });
 
   card('number-field', numberField, { key: 'angle', label: 'angle', value: 45, min: 0, max: 360, step: 5 },

@@ -2,6 +2,7 @@
 // are local; the Rust half hears one message per click, drop, hover change and view at rest.
 import { mount as toolbar } from '../widgets/toolbar.js';
 import { Emits, Kind, isColor } from '../protocol.js';
+import { flash } from '../note.js';
 
 export function mount(root, { send, onEvent }) {
   root.innerHTML = `<style>
@@ -21,7 +22,6 @@ export function mount(root, { send, onEvent }) {
   let view = { x: 0, y: 0, zoom: 40 }; // world units; zoom is pixels per unit
   let drag = null; // { kind: 'pan' | 'object', id, start, from, moved }
   let viewTimer = null;
-  let noteTimer = null;
 
   const num = (v, d) => (Number.isFinite(v) ? v : d);
   const vec = (v) => (Array.isArray(v) ? [num(v[0], 0), num(v[1], 0), num(v[2], 0)] : [0, 0, 0]);
@@ -31,11 +31,6 @@ export function mount(root, { send, onEvent }) {
     return [w / 2 + (x - view.x) * view.zoom, h / 2 - (y - view.y) * view.zoom];
   };
   const object = (id) => objects.find((o) => o.id === id);
-  const flash = (text) => {
-    note.textContent = text;
-    clearTimeout(noteTimer);
-    noteTimer = setTimeout(() => { note.textContent = ''; }, 2500);
-  };
 
   function draw() {
     const dpr = devicePixelRatio || 1;
@@ -210,8 +205,8 @@ export function mount(root, { send, onEvent }) {
       }
     } else if (e.View) {
       if (!drag && viewTimer === null) applyView(e.View.view);
-    } else if (e.Rejected) flash(e.Rejected.reason);
-    else if (e.Unsupported) flash(`protocol version ${JSON.stringify(e.Unsupported.version)} is not one this pane knows`);
+    } else if (e.Rejected) flash(note, e.Rejected.reason);
+    else if (e.Unsupported) flash(note, `protocol version ${JSON.stringify(e.Unsupported.version)} is not one this pane knows`);
     draw();
   });
 
@@ -222,6 +217,5 @@ export function mount(root, { send, onEvent }) {
     observer.disconnect();
     tools.destroy();
     clearTimeout(viewTimer);
-    clearTimeout(noteTimer);
   };
 }
