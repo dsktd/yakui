@@ -32,6 +32,9 @@ use crate::Result;
 /// Messages waiting for one pane. Past this the bus drops the newest and logs it.
 const QUEUE: usize = 256;
 
+/// The most a retained value may take as JSON, so a pane cannot fill bus.json.
+const MAX_RETAINED: usize = 256 * 1024;
+
 /// What a space needs of its bus, beyond what panes see. [`Local`] is the only
 /// implementation; one that gossips with other hosts would be another.
 pub trait Bus: BusStore {
@@ -46,6 +49,12 @@ pub trait Bus: BusStore {
     );
     /// Everything queued, in arrival order per pane.
     fn take_queued(&self) -> Vec<(PaneId, String, Message)>;
+    /// Record the kind of `pane`, whose prefix is the only private one it may write.
+    fn set_kind(
+        &self,
+        pane: PaneId,
+        kind: &str,
+    );
     fn save(&self) -> Result<()>;
 }
 
@@ -56,6 +65,7 @@ struct LocalInner {
     origin: HostId,
     retained: BTreeMap<String, Message>,
     subscribers: BTreeMap<String, BTreeSet<PaneId>>,
+    kinds: BTreeMap<PaneId, String>,
     queues: BTreeMap<PaneId, VecDeque<(String, Message)>>,
     path: PathBuf,
     dirty: bool,
@@ -86,6 +96,7 @@ impl Local {
             origin,
             retained,
             subscribers: BTreeMap::new(),
+            kinds: BTreeMap::new(),
             queues: BTreeMap::new(),
             path,
             dirty: false,
@@ -97,6 +108,15 @@ impl Local {
             inner.path.display()
         );
         Ok(Self(Arc::new(Mutex::new(inner))))
+    }
+    /// Retain [`seed_scene`] if the bus has no `scene`, so a fresh space shows something
+    /// before its first subscriber gets its retained message.
+    pub fn seed(&self) {
+        let mut bus = self.0.lock().unwrap();
+        if bus.retained.contains_key(Topic::SCENE) {
+            return;
+        }
+        let _ = bus.retain_scene(&seed_scene());
     }
 }
 
@@ -116,6 +136,14 @@ impl Bus for Local {
             panes.remove(&pane);
         }
         bus.queues.remove(&pane);
+        bus.kinds.remove(&pane);
+    }
+    fn set_kind(
+        &self,
+        pane: PaneId,
+        kind: &str,
+    ) {
+        self.0.lock().unwrap().kinds.insert(pane, kind.to_owned());
     }
     fn take_queued(&self) -> Vec<(PaneId, String, Message)> {
         let mut bus = self.0.lock().unwrap();
@@ -170,12 +198,13 @@ impl BusStore for Local {
             bus.command(pane, value);
             return;
         }
-        if Topic::is_standard(topic) && (retain || Topic::RETAINED.contains(&topic)) {
-            warn!("pane {pane} may not retain {topic}, dropped");
-            return;
-        }
-        if topic.starts_with("rejected/") {
-            warn!("pane {pane} may not publish {topic}, dropped");
+        let kind = bus.kinds.get(&pane).map(String::as_str);
+        let checked = check_topic(kind, topic, retain).and_then(|()| match retain {
+            true => check_size(&value),
+            false => Ok(()),
+        });
+        if let Err(err) = checked {
+            bus.refuse(pane, topic, &err);
             return;
         }
         bus.publish(Some(pane), topic, value, retain);
@@ -233,6 +262,17 @@ impl LocalInner {
             self.enqueue(pane, topic, msg.clone());
         }
     }
+    /// Drop a write of `pane` to `topic`: say why on `rejected/<pane>` and in the log.
+    fn refuse(
+        &mut self,
+        pane: PaneId,
+        topic: &str,
+        err: &anyhow::Error,
+    ) {
+        warn!("pane {pane} may not write {topic:?}: {err}");
+        let value = json!({ "topic": topic, "reason": err.to_string() });
+        self.publish(None, &Topic::rejected(pane), value, false);
+    }
     /// Apply a command from `pane`, or answer it on `rejected/<pane>`.
     fn command(
         &mut self,
@@ -269,24 +309,24 @@ impl LocalInner {
     fn retain_scene(
         &mut self,
         scene: &Scene,
-    ) {
-        self.publish(
-            None,
-            Topic::SCENE,
-            serde_json::to_value(scene).unwrap(),
-            true,
-        );
+    ) -> Result<()> {
+        self.retain_checked(Topic::SCENE, serde_json::to_value(scene).unwrap())
     }
     fn retain_selection(
         &mut self,
         selection: &Selection,
-    ) {
-        self.publish(
-            None,
-            Topic::SELECTION,
-            serde_json::to_value(selection).unwrap(),
-            true,
-        );
+    ) -> Result<()> {
+        self.retain_checked(Topic::SELECTION, serde_json::to_value(selection).unwrap())
+    }
+    /// Retain a standard topic's new value, unless it is too big to keep.
+    fn retain_checked(
+        &mut self,
+        topic: &str,
+        value: Value,
+    ) -> Result<()> {
+        check_size(&value)?;
+        self.publish(None, topic, value, true);
+        Ok(())
     }
     /// Validate first, then publish every topic the command touches, so a rejected command
     /// changes nothing.
@@ -306,7 +346,7 @@ impl LocalInner {
                         selection.ids.push(id.clone());
                     }
                 }
-                self.retain_selection(&selection);
+                self.retain_selection(&selection)?;
             }
             Command::AddObject { object } => {
                 let mut scene = self.scene()?;
@@ -318,7 +358,7 @@ impl LocalInner {
                 }
                 check_object(&object)?;
                 scene.objects.push(object);
-                self.retain_scene(&scene);
+                self.retain_scene(&scene)?;
             }
             Command::RemoveObjects { ids } => {
                 let mut scene = self.scene()?;
@@ -333,18 +373,23 @@ impl LocalInner {
                     None => Selection::default(),
                 };
                 selection.ids.retain(|id| !ids.contains(id));
-                self.retain_scene(&scene);
-                self.retain_selection(&selection);
+                self.retain_scene(&scene)?;
+                self.retain_selection(&selection)?;
             }
-            Command::SetProperty { id, key, value } => {
+            Command::SetProperty { ids, key, value } => {
+                if ids.is_empty() {
+                    return Err(anyhow!("No objects to set"));
+                }
                 let mut scene = self.scene()?;
-                let object = scene
-                    .objects
-                    .iter_mut()
-                    .find(|object| object.id == *id)
-                    .ok_or(anyhow!("No object {id}"))?;
-                set_property(object, key, value)?;
-                self.retain_scene(&scene);
+                for id in ids {
+                    let object = scene
+                        .objects
+                        .iter_mut()
+                        .find(|object| object.id == *id)
+                        .ok_or(anyhow!("No object {id}"))?;
+                    set_property(object, key, value)?;
+                }
+                self.retain_scene(&scene)?;
             }
             Command::MoveObject { id, position } => {
                 let mut scene = self.scene()?;
@@ -355,11 +400,94 @@ impl LocalInner {
                     .ok_or(anyhow!("No object {id}"))?;
                 check_vector(position)?;
                 object.position = *position;
-                self.retain_scene(&scene);
+                self.retain_scene(&scene)?;
             }
         }
         Ok(())
     }
+}
+
+/// What a pane of `kind` may publish, or retain if `retain`: the standard transient topics
+/// (not retained) and `<kind>/<name>`.
+fn check_topic(
+    kind: Option<&str>,
+    topic: &str,
+    retain: bool,
+) -> Result<()> {
+    if Topic::TRANSIENT.contains(&topic) {
+        if retain {
+            return Err(anyhow!("{topic} is transient, it cannot be retained"));
+        }
+        return Ok(());
+    }
+    let name = kind
+        .and_then(|kind| topic.strip_prefix(kind))
+        .and_then(|rest| rest.strip_prefix('/'));
+    match name {
+        Some(name) if !name.is_empty() => Ok(()),
+        _ => Err(anyhow!("A pane writes only its own {kind:?}/<name> topics")),
+    }
+}
+
+/// Four objects, one definition for every viewport.
+fn seed_scene() -> Scene {
+    let objects = [
+        (
+            "seed-box",
+            "Box",
+            "box",
+            [-2.0, 0.0, 0.0],
+            [1.5, 1.5, 1.5],
+            "#e06c3a",
+        ),
+        (
+            "seed-ball",
+            "Ball",
+            "sphere",
+            [0.5, 0.5, 0.0],
+            [1.0, 1.0, 1.0],
+            "#3a8ee0",
+        ),
+        (
+            "seed-slab",
+            "Slab",
+            "box",
+            [0.0, -1.5, 0.0],
+            [6.0, 0.3, 4.0],
+            "#6b6b6b",
+        ),
+        (
+            "seed-lamp",
+            "Lamp",
+            "light",
+            [2.0, 2.0, 1.0],
+            [0.4, 0.4, 0.4],
+            "#ffe08a",
+        ),
+    ];
+    let objects = objects
+        .into_iter()
+        .map(|(id, name, kind, position, size, color)| Object {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            kind: kind.to_owned(),
+            position,
+            size,
+            color: color.to_owned(),
+            ..Default::default()
+        })
+        .collect();
+    Scene { objects }
+}
+
+fn check_size(value: &Value) -> Result<()> {
+    let size = value.to_string().len();
+    if size > MAX_RETAINED {
+        return Err(anyhow!(
+            "A retained value takes {size} bytes, over {MAX_RETAINED}"
+        ));
+    }
+    Ok(())
 }
 
 fn fresh_id(scene: &Scene) -> String {
@@ -522,6 +650,7 @@ mod test {
     #[test]
     fn test_private_and_standard_topics() {
         let bus = open(&tmp());
+        bus.set_kind(pid(1), "view3d");
         bus.subscribe(pid(2), "view3d/camera");
         bus.publish(pid(1), "view3d/camera", json!({ "yaw": 1 }), true);
         bus.publish(pid(1), "view3d/camera", json!({ "yaw": 1 }), true);
@@ -553,6 +682,117 @@ mod test {
         bus.publish(pid(1), "rejected/2", json!("nope"), false);
         assert!(bus.take_queued().is_empty());
         assert_eq!(bus.retained(Topic::SCENE), None);
+    }
+
+    #[test]
+    fn test_check_topic() {
+        let ok = |kind, topic, retain| check_topic(kind, topic, retain).is_ok();
+        // Standard transient topics, not retained; private ones under the own prefix.
+        assert!(ok(Some("notes"), "hover", false));
+        assert!(ok(Some("notes"), "tool", false));
+        assert!(ok(Some("notes"), "focus", false));
+        assert!(ok(Some("notes"), "notes/text", true));
+        assert!(ok(Some("notes"), "notes/text", false));
+        assert!(ok(Some("notes"), "notes/a/b", true));
+        assert!(!ok(Some("notes"), "hover", true));
+        // Another pane's prefix, a prefix that is only a string prefix, a standard retained
+        // topic, a rejection, empty and malformed names, a pane of no known kind.
+        assert!(!ok(Some("notes"), "clock/text", true));
+        assert!(!ok(Some("notes"), "notesy/text", true));
+        assert!(!ok(Some("notes"), "scene", false));
+        assert!(!ok(Some("notes"), "selection", true));
+        assert!(!ok(Some("notes"), "protocol", false));
+        assert!(!ok(Some("notes"), "rejected/1", false));
+        assert!(!ok(Some("notes"), "", false));
+        assert!(!ok(Some("notes"), "notes", true));
+        assert!(!ok(Some("notes"), "notes/", true));
+        assert!(!ok(Some("notes"), "/text", true));
+        assert!(!ok(None, "notes/text", true));
+    }
+
+    #[test]
+    fn test_refused_write() {
+        let bus = open(&tmp());
+        bus.set_kind(pid(1), "notes");
+        bus.subscribe(pid(1), &Topic::rejected(pid(1)));
+        bus.subscribe(pid(2), "clock/text");
+        bus.publish(pid(1), "clock/text", json!("x"), true);
+        let queued = bus.take_queued();
+        assert_eq!(
+            topics(&queued),
+            vec![(1, "rejected/00000000000000000000000000000abc-1")]
+        );
+        assert_eq!(queued[0].2.value["topic"], json!("clock/text"));
+        assert!(queued[0].2.value["reason"].is_string());
+        assert_eq!(bus.retained("clock/text"), None);
+    }
+
+    #[test]
+    fn test_check_size() {
+        // A string is its length plus two quotes.
+        assert!(check_size(&json!("x".repeat(MAX_RETAINED - 2))).is_ok());
+        assert!(check_size(&json!("x".repeat(MAX_RETAINED - 1))).is_err());
+    }
+
+    #[test]
+    fn test_oversized_writes() {
+        let bus = open(&tmp());
+        bus.set_kind(pid(1), "notes");
+        let rejected = Topic::rejected(pid(1));
+        bus.subscribe(pid(1), &rejected);
+        let big = json!("x".repeat(MAX_RETAINED));
+        bus.publish(pid(1), "notes/text", big.clone(), true);
+        assert_eq!(bus.retained("notes/text"), None);
+        // Transient messages are not kept, so size does not matter.
+        bus.subscribe(pid(2), "notes/text");
+        bus.publish(pid(1), "notes/text", big, false);
+        let queued = bus.take_queued();
+        assert_eq!(
+            topics(&queued),
+            vec![
+                (1, "rejected/00000000000000000000000000000abc-1"),
+                (2, "notes/text")
+            ]
+        );
+        // A command whose scene would be too big is rejected whole.
+        let mut fat = object("a", "#ff0000");
+        fat.props
+            .insert("blob".to_owned(), json!("x".repeat(MAX_RETAINED)));
+        command(&bus, pid(1), Command::AddObject { object: fat });
+        assert_eq!(bus.retained(Topic::SCENE), None);
+        let queued = bus.take_queued();
+        assert_eq!(
+            topics(&queued),
+            vec![(1, "rejected/00000000000000000000000000000abc-1")]
+        );
+        assert!(
+            queued[0].2.value["reason"]
+                .as_str()
+                .unwrap()
+                .contains("over")
+        );
+    }
+
+    #[test]
+    fn test_seed() {
+        let path = tmp();
+        let bus = open(&path);
+        bus.seed();
+        bus.subscribe(pid(2), Topic::SCENE);
+        let queued = bus.take_queued();
+        assert_eq!(topics(&queued), vec![(2, "scene")]);
+        assert_eq!(Scene::from_message(&queued[0].2.value).objects.len(), 4);
+        // A scene already there, even an empty one, is left alone.
+        command(
+            &bus,
+            pid(1),
+            Command::RemoveObjects {
+                ids: seed_scene().objects.into_iter().map(|o| o.id).collect(),
+            },
+        );
+        let scene = bus.retained(Topic::SCENE).unwrap();
+        bus.seed();
+        assert_eq!(bus.retained(Topic::SCENE), Some(scene));
     }
 
     #[test]
@@ -597,17 +837,17 @@ mod test {
                 ids: vec!["zz".to_owned()],
             },
             Command::SetProperty {
-                id: "a".to_owned(),
+                ids: vec!["a".to_owned()],
                 key: "color".to_owned(),
                 value: json!("#12345"),
             },
             Command::SetProperty {
-                id: "a".to_owned(),
+                ids: vec!["a".to_owned()],
                 key: "position".to_owned(),
                 value: json!("banana"),
             },
             Command::SetProperty {
-                id: "a".to_owned(),
+                ids: vec!["a".to_owned()],
                 key: "id".to_owned(),
                 value: json!("b"),
             },
@@ -630,12 +870,12 @@ mod test {
         assert_eq!(bus.0.lock().unwrap().retained, before);
         let good = [
             Command::SetProperty {
-                id: "a".to_owned(),
+                ids: vec!["a".to_owned()],
                 key: "color".to_owned(),
                 value: json!("#ABCDEF"),
             },
             Command::SetProperty {
-                id: "a".to_owned(),
+                ids: vec!["a".to_owned()],
                 key: "weight".to_owned(),
                 value: json!(3),
             },
@@ -672,9 +912,38 @@ mod test {
     }
 
     #[test]
+    fn test_set_property_many() {
+        let bus = open(&tmp());
+        bus.subscribe(pid(2), Topic::SCENE);
+        for id in ["a", "b", "c"] {
+            add(&bus, id);
+        }
+        bus.take_queued();
+        let set = |ids: &[&str]| Command::SetProperty {
+            ids: ids.iter().map(|id| id.to_string()).collect(),
+            key: "color".to_owned(),
+            value: json!("#00ff00"),
+        };
+        // One command, one scene.
+        command(&bus, pid(1), set(&["a", "b"]));
+        assert_eq!(topics(&bus.take_queued()), vec![(2, "scene")]);
+        let scene = Scene::from_message(&bus.retained(Topic::SCENE).unwrap().value);
+        assert_eq!(scene.object("a").unwrap().color, "#00ff00");
+        assert_eq!(scene.object("b").unwrap().color, "#00ff00");
+        assert_ne!(scene.object("c").unwrap().color, "#00ff00");
+        // An unknown id, or none at all, rejects the whole command.
+        let before = bus.0.lock().unwrap().retained.clone();
+        command(&bus, pid(1), set(&["c", "zz"]));
+        command(&bus, pid(1), set(&[]));
+        assert!(topics(&bus.take_queued()).is_empty());
+        assert_eq!(bus.0.lock().unwrap().retained, before);
+    }
+
+    #[test]
     fn test_persist() {
         let path = tmp();
         let bus = open(&path);
+        bus.set_kind(pid(1), "view2d");
         add(&bus, "a");
         bus.publish(pid(1), Topic::HOVER, json!({ "id": "a" }), false);
         bus.publish(pid(1), "view2d/view", json!({ "zoom": 2 }), true);
@@ -691,6 +960,7 @@ mod test {
         assert_eq!(view.origin, HOST);
         assert_eq!(again.retained(Topic::HOVER), None);
         // The count goes on from the file.
+        again.set_kind(pid(1), "view2d");
         again.publish(pid(1), "view2d/view", json!({ "zoom": 3 }), true);
         assert_eq!(again.retained("view2d/view").unwrap().seq, Some(2));
         // Nothing dirty: saving again leaves the file alone.

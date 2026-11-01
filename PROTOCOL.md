@@ -46,7 +46,11 @@ size: [x,y,z], color: "#rrggbb", props?: { [key]: JSON } }`. An unknown
 Private topics: a pane may use any topic under its own prefix
 (`notes/text`, `view3d/camera`), retained (`retain`) or transient
 (`publish`) per message, any shape. Other panes may subscribe to them; the shape is
-then that pane's documented contract.
+then that pane's documented contract. A pane may publish only the standard transient
+topics and its own prefix; any other write (another pane's prefix, a standard retained
+topic, an empty or malformed name) is dropped, and the host answers `rejected/<pane>` with
+`{ "topic", "reason" }`. A retained value over 256 KiB as JSON is refused the same way
+(a command that would make `scene` or `selection` that big is rejected).
 
 Rules: subscribe by name, never by sender. Tolerate a missing or malformed
 message (ignore it, never panic, never "repair" a topic you do not own).
@@ -61,13 +65,13 @@ publishes `rejected/<pane>` to the sender when a command is invalid. A
 command is the result of an interaction, never a stream (a `move_object`
 on drop, not per pointer move).
 
-| command          | fields                           | effect                                                  |
-| ---------------- | -------------------------------- | ------------------------------------------------------- |
-| `select`         | `ids: [string]`                  | `selection.ids = ids` (dedup; unknown ids rejected)     |
-| `add_object`     | `object: Object` (`id` optional) | append; host assigns `id` when missing                  |
-| `remove_objects` | `ids: [string]`                  | remove; also drop them from `selection`                 |
-| `set_property`   | `id, key, value`                 | known key on the object, else `props[key]`; typed check |
-| `move_object`    | `id, position: [x,y,z]`          | `position = position`                                   |
+| command          | fields                           | effect                                                                |
+| ---------------- | -------------------------------- | --------------------------------------------------------------------- |
+| `select`         | `ids: [string]`                  | `selection.ids = ids` (dedup; unknown ids rejected)                   |
+| `add_object`     | `object: Object` (`id` optional) | append; host assigns `id` when missing                                |
+| `remove_objects` | `ids: [string]`                  | remove; also drop them from `selection`                               |
+| `set_property`   | `ids: [string], key, value`      | known key on each object, else `props[key]`; typed check, all or none |
+| `move_object`    | `id, position: [x,y,z]`          | `position = position`                                                 |
 
 `#[serde(tag = "cmd")]` in Rust; `{ "cmd": "select", "ids": [...] }` on the
 wire. A rejected command changes nothing. `set_property` refuses `id` and

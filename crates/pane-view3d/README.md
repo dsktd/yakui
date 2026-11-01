@@ -14,9 +14,10 @@ zoom), click to select by reading an id-coloured frame back.
   `Camera { camera }`, `Rejected { reason }`, `Unsupported { version }`.
 - Topics subscribed: `scene`, `selection`, `protocol` (retained, standard); `hover`, `focus`,
   `rejected/<pane>` (transient, standard); `view3d/camera` (retained, private).
-- Topics published: `cmd` with `select`, and four `add_object` to seed a space that has no
-  `scene` by the time `protocol` arrives; `hover`; `view3d/camera` retained as
-  `{ yaw, pitch, distance, target: [x, y, z] }`, shared by every view3d in the space.
+- Topics published: `cmd` with `select`; `hover`; `view3d/camera` retained as
+  `{ yaw, pitch, distance, target: [x, y, z] }` (radians, world units), shared by every view3d
+  in the space. All are finite numbers and `distance` is positive; any other `SetCamera` is
+  logged and dropped.
 - Widgets: toolbar (`reset`, `clear`).
 - Smoothness: orbit, zoom and hover picking never leave the browser; one coarse message per
   click, hover change and camera at rest. Objects are not dragged in 3D (view2d does that).

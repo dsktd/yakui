@@ -1,5 +1,6 @@
 //! A front view (x right, y up) of the `scene` on a canvas: pan, zoom, drag, click to select.
 
+use log::warn;
 use pane_api::Bus;
 use pane_api::Ctx;
 use pane_api::Message;
@@ -8,7 +9,6 @@ use pane_api::Pane;
 use pane_api::protocol::Command;
 use pane_api::protocol::Focus;
 use pane_api::protocol::Hover;
-use pane_api::protocol::Object;
 use pane_api::protocol::Protocol;
 use pane_api::protocol::Rejected;
 use pane_api::protocol::Scene;
@@ -16,10 +16,22 @@ use pane_api::protocol::Selection;
 use pane_api::protocol::Topic;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value;
 
 /// The pan and zoom at rest, shared by every view2d of the space and kept across reloads.
 const VIEW: &str = "view2d/view";
+
+/// The pan and zoom: the centre in world units, and pixels per unit.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct View {
+    x: f64,
+    y: f64,
+    zoom: f64,
+}
+impl View {
+    fn is_valid(&self) -> bool {
+        self.x.is_finite() && self.y.is_finite() && self.zoom.is_finite() && self.zoom > 0.0
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 pub enum Msg {
@@ -30,7 +42,7 @@ pub enum Msg {
     /// An object was dropped after a drag.
     Move { id: String, position: [f64; 3] },
     /// Pan or zoom came to rest.
-    SetView { view: Value },
+    SetView { view: View },
 }
 
 #[derive(Serialize)]
@@ -38,7 +50,7 @@ pub enum Event {
     State {
         scene: Scene,
         selection: Selection,
-        view: Value,
+        view: Option<View>,
     },
     Scene {
         scene: Scene,
@@ -53,7 +65,7 @@ pub enum Event {
         id: String,
     },
     View {
-        view: Value,
+        view: View,
     },
     Rejected {
         reason: String,
@@ -68,10 +80,7 @@ pub struct View2d {
     rejected: String,
     scene: Scene,
     selection: Selection,
-    view: Value,
-    /// A retained `scene` arrived; without one by the time `protocol` comes, the space is
-    /// fresh and this pane seeds it.
-    seen_scene: bool,
+    view: Option<View>,
 }
 impl Pane for View2d {
     const KIND: &'static str = "view2d";
@@ -85,7 +94,7 @@ impl Pane for View2d {
         ctx: Ctx,
     ) -> Self {
         let rejected = Topic::rejected(ctx.id);
-        // Retained ones first, `protocol` after `scene`, so a missing scene is known by then.
+        // Retained ones first.
         for topic in [Topic::SCENE, Topic::SELECTION, VIEW, Topic::PROTOCOL] {
             ctx.bus.subscribe(topic);
         }
@@ -97,8 +106,7 @@ impl Pane for View2d {
             rejected,
             scene: Scene::default(),
             selection: Selection::default(),
-            view: Value::Null,
-            seen_scene: false,
+            view: None,
         }
     }
     fn update(
@@ -112,7 +120,13 @@ impl Pane for View2d {
                 .bus
                 .publish(Topic::HOVER, serde_json::to_value(Hover { id }).unwrap()),
             Msg::Move { id, position } => self.bus.command(Command::MoveObject { id, position }),
-            Msg::SetView { view } => self.bus.retain(VIEW, view),
+            Msg::SetView { view } => {
+                if !view.is_valid() {
+                    warn!("view2d: refusing view {view:?}");
+                    return;
+                }
+                self.bus.retain(VIEW, serde_json::to_value(view).unwrap());
+            }
         }
     }
     fn on_message(
@@ -123,7 +137,6 @@ impl Pane for View2d {
     ) {
         match topic {
             Topic::SCENE => {
-                self.seen_scene = true;
                 self.scene = Scene::from_message(&msg.value);
                 out.emit(Event::Scene {
                     scene: self.scene.clone(),
@@ -141,10 +154,6 @@ impl Pane for View2d {
                     out.emit(Event::Unsupported {
                         version: protocol.version,
                     });
-                    return;
-                }
-                if !self.seen_scene {
-                    seed(&self.bus);
                 }
             }
             Topic::HOVER => out.emit(Event::Hover {
@@ -157,10 +166,14 @@ impl Pane for View2d {
                 out.emit(Event::Focus { id: focus.id });
             }
             VIEW => {
-                self.view = msg.value;
-                out.emit(Event::View {
-                    view: self.view.clone(),
-                });
+                let Ok(view) = serde_json::from_value::<View>(msg.value) else {
+                    return;
+                };
+                if !view.is_valid() {
+                    return;
+                }
+                self.view = Some(view);
+                out.emit(Event::View { view });
             }
             _ if topic == self.rejected => out.emit(Event::Rejected {
                 reason: Rejected::reason(&msg.value),
@@ -172,58 +185,32 @@ impl Pane for View2d {
         Event::State {
             scene: self.scene.clone(),
             selection: self.selection.clone(),
-            view: self.view.clone(),
+            view: self.view,
         }
     }
 }
 
-/// Four objects so a fresh space shows something. Fixed ids: a second viewport seeding at
-/// the same moment is refused object by object and the scene stays at four.
-fn seed(bus: &Bus) {
-    let objects = [
-        (
-            "seed-box",
-            "Box",
-            "box",
-            [-2.0, 0.0, 0.0],
-            [1.5, 1.5, 1.5],
-            "#e06c3a",
-        ),
-        (
-            "seed-ball",
-            "Ball",
-            "sphere",
-            [0.5, 0.5, 0.0],
-            [1.0, 1.0, 1.0],
-            "#3a8ee0",
-        ),
-        (
-            "seed-slab",
-            "Slab",
-            "box",
-            [0.0, -1.5, 0.0],
-            [6.0, 0.3, 4.0],
-            "#6b6b6b",
-        ),
-        (
-            "seed-lamp",
-            "Lamp",
-            "light",
-            [2.0, 2.0, 1.0],
-            [0.4, 0.4, 0.4],
-            "#ffe08a",
-        ),
-    ];
-    for (id, name, kind, position, size, color) in objects {
-        let object = Object {
-            id: id.to_owned(),
-            name: name.to_owned(),
-            kind: kind.to_owned(),
-            position,
-            size,
-            color: color.to_owned(),
-            ..Default::default()
-        };
-        bus.command(Command::AddObject { object });
+#[cfg(test)]
+mod test {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn test_view_shape() {
+        let view: View = serde_json::from_value(json!({ "x": 1, "y": -2.5, "zoom": 40 })).unwrap();
+        assert!(view.is_valid());
+        assert!(serde_json::from_value::<View>(json!({ "x": 1, "y": 2 })).is_err());
+        assert!(serde_json::from_value::<View>(json!({ "x": "1", "y": 2, "zoom": 3 })).is_err());
+        for zoom in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(!View { zoom, ..view }.is_valid());
+        }
+        assert!(
+            !View {
+                x: f64::INFINITY,
+                ..view
+            }
+            .is_valid()
+        );
     }
 }
