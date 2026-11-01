@@ -10,6 +10,7 @@ members = [
 	"crates/pane-clock",
 	"crates/pane-inspector",
 	"crates/pane-notes",
+	"crates/pane-palette",
 	"crates/pane-view2d",
 	"crates/pane-view3d",
 	"crates/shell-tauri",
@@ -21,6 +22,7 @@ default-members = [
 	"crates/pane-clock",
 	"crates/pane-inspector",
 	"crates/pane-notes",
+	"crates/pane-palette",
 	"crates/pane-view2d",
 	"crates/pane-view3d",
 ]
