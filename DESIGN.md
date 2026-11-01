@@ -22,7 +22,8 @@ Non-goals for v1: theming system, plugin marketplace, multi-user editing.
 - Remote view: required (mobile web, laptop).
 - Layout: shared across clients for v1 (one layout, every full-view client
   sees the same splits; `/pane/<id>` clients pick a pane and ignore layout).
-- Open: Rust-only panes vs. pure-web panes allowed (see "Pane authoring").
+- Panes: hybrid (Rust half for durable state, web half for interaction;
+  see "Pane authoring").
 
 ## Reconsidered for smoothness
 
@@ -95,7 +96,7 @@ configured with (a URL in `Config`), not a reference to another pane.
 Isolation is enforced by crate dependencies: a `pane-*` crate that imports
 another pane or `host` fails review and a CI `cargo deny`/`cargo tree` check.
 
-### Pane authoring: Rust-only vs. pure-web (open)
+### Pane authoring: Rust-only vs. pure-web (decided: hybrid)
 
 |                           | Rust-only (web half is a thin renderer)                                                     | Pure-web allowed (no Rust half)                                         | Hybrid (Rust half required, may be trivial)                     |
 | ------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------- |
