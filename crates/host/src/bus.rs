@@ -376,14 +376,19 @@ impl LocalInner {
                 self.retain_scene(&scene)?;
                 self.retain_selection(&selection)?;
             }
-            Command::SetProperty { id, key, value } => {
+            Command::SetProperty { ids, key, value } => {
+                if ids.is_empty() {
+                    return Err(anyhow!("No objects to set"));
+                }
                 let mut scene = self.scene()?;
-                let object = scene
-                    .objects
-                    .iter_mut()
-                    .find(|object| object.id == *id)
-                    .ok_or(anyhow!("No object {id}"))?;
-                set_property(object, key, value)?;
+                for id in ids {
+                    let object = scene
+                        .objects
+                        .iter_mut()
+                        .find(|object| object.id == *id)
+                        .ok_or(anyhow!("No object {id}"))?;
+                    set_property(object, key, value)?;
+                }
                 self.retain_scene(&scene)?;
             }
             Command::MoveObject { id, position } => {
@@ -832,17 +837,17 @@ mod test {
                 ids: vec!["zz".to_owned()],
             },
             Command::SetProperty {
-                id: "a".to_owned(),
+                ids: vec!["a".to_owned()],
                 key: "color".to_owned(),
                 value: json!("#12345"),
             },
             Command::SetProperty {
-                id: "a".to_owned(),
+                ids: vec!["a".to_owned()],
                 key: "position".to_owned(),
                 value: json!("banana"),
             },
             Command::SetProperty {
-                id: "a".to_owned(),
+                ids: vec!["a".to_owned()],
                 key: "id".to_owned(),
                 value: json!("b"),
             },
@@ -865,12 +870,12 @@ mod test {
         assert_eq!(bus.0.lock().unwrap().retained, before);
         let good = [
             Command::SetProperty {
-                id: "a".to_owned(),
+                ids: vec!["a".to_owned()],
                 key: "color".to_owned(),
                 value: json!("#ABCDEF"),
             },
             Command::SetProperty {
-                id: "a".to_owned(),
+                ids: vec!["a".to_owned()],
                 key: "weight".to_owned(),
                 value: json!(3),
             },
@@ -904,6 +909,34 @@ mod test {
             bus.retained(Topic::SELECTION).unwrap().value,
             json!({ "ids": [] })
         );
+    }
+
+    #[test]
+    fn test_set_property_many() {
+        let bus = open(&tmp());
+        bus.subscribe(pid(2), Topic::SCENE);
+        for id in ["a", "b", "c"] {
+            add(&bus, id);
+        }
+        bus.take_queued();
+        let set = |ids: &[&str]| Command::SetProperty {
+            ids: ids.iter().map(|id| id.to_string()).collect(),
+            key: "color".to_owned(),
+            value: json!("#00ff00"),
+        };
+        // One command, one scene.
+        command(&bus, pid(1), set(&["a", "b"]));
+        assert_eq!(topics(&bus.take_queued()), vec![(2, "scene")]);
+        let scene = Scene::from_message(&bus.retained(Topic::SCENE).unwrap().value);
+        assert_eq!(scene.object("a").unwrap().color, "#00ff00");
+        assert_eq!(scene.object("b").unwrap().color, "#00ff00");
+        assert_ne!(scene.object("c").unwrap().color, "#00ff00");
+        // An unknown id, or none at all, rejects the whole command.
+        let before = bus.0.lock().unwrap().retained.clone();
+        command(&bus, pid(1), set(&["c", "zz"]));
+        command(&bus, pid(1), set(&[]));
+        assert!(topics(&bus.take_queued()).is_empty());
+        assert_eq!(bus.0.lock().unwrap().retained, before);
     }
 
     #[test]

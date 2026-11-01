@@ -65,13 +65,13 @@ publishes `rejected/<pane>` to the sender when a command is invalid. A
 command is the result of an interaction, never a stream (a `move_object`
 on drop, not per pointer move).
 
-| command          | fields                           | effect                                                  |
-| ---------------- | -------------------------------- | ------------------------------------------------------- |
-| `select`         | `ids: [string]`                  | `selection.ids = ids` (dedup; unknown ids rejected)     |
-| `add_object`     | `object: Object` (`id` optional) | append; host assigns `id` when missing                  |
-| `remove_objects` | `ids: [string]`                  | remove; also drop them from `selection`                 |
-| `set_property`   | `id, key, value`                 | known key on the object, else `props[key]`; typed check |
-| `move_object`    | `id, position: [x,y,z]`          | `position = position`                                   |
+| command          | fields                           | effect                                                                |
+| ---------------- | -------------------------------- | --------------------------------------------------------------------- |
+| `select`         | `ids: [string]`                  | `selection.ids = ids` (dedup; unknown ids rejected)                   |
+| `add_object`     | `object: Object` (`id` optional) | append; host assigns `id` when missing                                |
+| `remove_objects` | `ids: [string]`                  | remove; also drop them from `selection`                               |
+| `set_property`   | `ids: [string], key, value`      | known key on each object, else `props[key]`; typed check, all or none |
+| `move_object`    | `id, position: [x,y,z]`          | `position = position`                                                 |
 
 `#[serde(tag = "cmd")]` in Rust; `{ "cmd": "select", "ids": [...] }` on the
 wire. A rejected command changes nothing. `set_property` refuses `id` and

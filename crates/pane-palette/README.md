@@ -12,5 +12,5 @@ first selected object's current colour is lit.
   `Unsupported { version }`.
 - Topics subscribed: `scene`, `selection`, `protocol` (retained, standard);
   `rejected/<pane>` (transient, standard).
-- Topics published: `cmd` with one `set_property` (`color`) per selected object.
+- Topics published: `cmd` with one `set_property` (`color`) for all selected objects.
 - Widgets: palette-grid.
