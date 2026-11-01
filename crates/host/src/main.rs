@@ -25,7 +25,13 @@ async fn main() -> Result<()> {
     };
     let mut registry = Registry::default();
     registry.add::<pane_clock::Clock>();
+    registry.add::<pane_inspector::Inspector>();
     registry.add::<pane_notes::Notes>();
+    registry.add::<pane_outliner::Outliner>();
+    registry.add::<pane_palette::Palette>();
+    registry.add::<pane_view2d::View2d>();
+    registry.add::<pane_view3d::View3d>();
+    registry.add::<pane_widgets::Widgets>();
     let host = Host::open(dir, registry)?;
     server::serve(host, cli.port).await
 }

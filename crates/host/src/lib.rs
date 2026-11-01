@@ -1,3 +1,4 @@
+pub mod bus;
 pub mod host;
 pub mod layout;
 pub mod registry;

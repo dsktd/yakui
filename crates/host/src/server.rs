@@ -35,6 +35,29 @@ use crate::space::SpaceId;
 const INDEX: &str = include_str!("../web/index.html");
 const SHELL_JS: &str = include_str!("../web/shell.js");
 const SHELL_CSS: &str = include_str!("../web/shell.css");
+const PROTOCOL_JS: &str = include_str!("../web/protocol.js");
+/// The widgets (PROTOCOL.md, DESIGN.md "Widgets"): pane modules import them as
+/// `../widgets/<name>.js`, so they resolve under any proxy prefix.
+const WIDGETS: [(&str, &str); 6] = [
+    (
+        "color-swatch.js",
+        include_str!("../web/widgets/color-swatch.js"),
+    ),
+    (
+        "number-field.js",
+        include_str!("../web/widgets/number-field.js"),
+    ),
+    (
+        "palette-grid.js",
+        include_str!("../web/widgets/palette-grid.js"),
+    ),
+    (
+        "property-list.js",
+        include_str!("../web/widgets/property-list.js"),
+    ),
+    ("toolbar.js", include_str!("../web/widgets/toolbar.js")),
+    ("tree.js", include_str!("../web/widgets/tree.js")),
+];
 
 /// The shell's pages: `/` goes to the browser's own space, `/s/<space>/` is the layout and
 /// `/s/<space>/pane/<id>` one pane. A malformed space id is a 400 from the path extractor.
@@ -48,6 +71,8 @@ pub async fn serve(
         .route("/s/{space}/pane/{id}", get(pane_index))
         .route("/shell.js", get(shell_js))
         .route("/shell.css", get(shell_css))
+        .route("/protocol.js", get(protocol_js))
+        .route("/widgets/{name}", get(widget))
         .route("/modules/{kind}", get(module))
         .route("/ws", get(ws))
         .with_state(host);
@@ -85,6 +110,19 @@ async fn shell_js() -> Response {
 
 async fn shell_css() -> Response {
     ([(header::CONTENT_TYPE, "text/css")], SHELL_CSS).into_response()
+}
+
+async fn protocol_js() -> Response {
+    ([(header::CONTENT_TYPE, "text/javascript")], PROTOCOL_JS).into_response()
+}
+
+async fn widget(Path(name): Path<String>) -> Response {
+    match WIDGETS.iter().find(|(file, _source)| *file == name) {
+        Some((_file, source)) => {
+            ([(header::CONTENT_TYPE, "text/javascript")], *source).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn module(
@@ -222,5 +260,14 @@ mod tests {
         assert!(with_base(INDEX, 3).contains("<head>\n  <base href=\"../../../\">"));
         assert!(!INDEX.contains("<base"));
         assert!(!INDEX.contains("=\"/"));
+    }
+
+    #[test]
+    fn widgets_import_only_widgets() {
+        for (file, source) in WIDGETS {
+            for line in source.lines().filter(|line| line.starts_with("import ")) {
+                assert!(line.contains(" from './"), "{file}: {line}");
+            }
+        }
     }
 }

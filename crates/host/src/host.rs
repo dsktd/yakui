@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use anyhow::anyhow;
 use log::info;
+use pane_api::HostId;
 
 use crate::Result;
 use crate::registry::Registry;
@@ -17,6 +19,7 @@ use crate::space::SpaceId;
 pub struct Host(Arc<Mutex<HostInner>>);
 pub struct HostInner {
     dir: PathBuf,
+    id: HostId,
     registry: Registry,
     spaces: HashMap<SpaceId, Space>,
 }
@@ -29,8 +32,10 @@ impl Host {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
         migrate(&dir)?;
+        let id = host_id(&dir)?;
         let inner = HostInner {
             dir,
+            id,
             registry,
             spaces: HashMap::new(),
         };
@@ -45,7 +50,7 @@ impl Host {
         if let Some(space) = host.spaces.get(id) {
             return Ok(space.clone());
         }
-        let space = Space::open(space_dir(&host.dir, id), host.registry.clone())?;
+        let space = Space::open(space_dir(&host.dir, id), host.registry.clone(), host.id)?;
         host.spaces.insert(id.clone(), space.clone());
         Ok(space)
     }
@@ -55,6 +60,18 @@ impl Host {
     ) -> Option<&'static str> {
         self.0.lock().unwrap().registry.module(kind)
     }
+}
+
+/// This host's id, made once and kept in `<dir>/host-id`; pane ids and bus messages carry it.
+fn host_id(dir: &Path) -> Result<HostId> {
+    let path = dir.join("host-id");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        return text.trim().parse().map_err(|err: String| anyhow!(err));
+    }
+    let id = HostId(rand::random());
+    std::fs::write(&path, id.to_string())?;
+    info!("new host id {id}");
+    Ok(id)
 }
 
 fn space_dir(

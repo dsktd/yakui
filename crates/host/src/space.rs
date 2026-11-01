@@ -10,7 +10,10 @@ use std::sync::Mutex;
 use anyhow::anyhow;
 use log::debug;
 use log::info;
+use log::warn;
+use pane_api::Bus as PaneBus;
 use pane_api::Ctx;
+use pane_api::HostId;
 use pane_api::PaneId;
 use serde::Deserialize;
 use serde_json::Value;
@@ -18,6 +21,8 @@ use serde_json::json;
 use tokio::sync::broadcast;
 
 use crate::Result;
+use crate::bus::Bus;
+use crate::bus::Local;
 use crate::layout::Axis;
 use crate::layout::Layout;
 use crate::layout::Op;
@@ -81,41 +86,51 @@ pub struct SpaceInner {
     layout: Layout,
     panes: HashMap<PaneId, Box<dyn AnyPane>>,
     registry: Registry,
+    bus: Arc<dyn Bus>,
+    host: HostId,
     dir: PathBuf,
     tx: broadcast::Sender<Frame>,
 }
 
 impl Space {
-    /// Load `<dir>/layout.json` or start with clock | notes, then create every pane.
+    /// Load `<dir>/layout.json` or start with clock | notes, then create every pane. The bus
+    /// is opened first, so a pane's `new()` can subscribe to it.
     pub fn open(
         dir: impl Into<PathBuf>,
         registry: Registry,
+        host: HostId,
     ) -> Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
+        let bus: Arc<dyn Bus> = Arc::new(Local::open(dir.join("bus.json"), host)?);
         let path = dir.join("layout.json");
         let layout = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)?,
             Err(_) => {
-                let mut layout = Layout::single(PaneId(1), "clock");
-                layout.split(PaneId(1), Axis::Vertical, PaneId(2), "notes")?;
+                let one = PaneId::new(host, 1);
+                let two = PaneId::new(host, 2);
+                let mut layout = Layout::single(one, "clock");
+                layout.split(one, Axis::Vertical, two, "notes")?;
                 layout
             }
         };
         let mut panes = HashMap::new();
         for (id, entry) in &layout.panes {
-            let ctx = ctx(&dir, *id);
+            let ctx = ctx(&dir, &bus, *id);
             panes.insert(*id, registry.make(&entry.kind, entry.config.clone(), ctx)?);
         }
         info!("{} panes from {}", panes.len(), path.display());
         let (tx, _rx) = broadcast::channel(256);
-        let inner = SpaceInner {
+        let mut inner = SpaceInner {
             layout,
             panes,
             registry,
+            bus,
+            host,
             dir,
             tx,
         };
+        inner.settle()?;
         Ok(Self(Arc::new(Mutex::new(inner))))
     }
     pub fn subscribe(&self) -> broadcast::Receiver<Frame> {
@@ -153,10 +168,11 @@ impl Space {
         for event in p.update(msg)? {
             let _ = space.tx.send(pane_frame(pane, event));
         }
-        Ok(())
+        space.settle()
     }
     /// Apply a layout op, broadcast the result, then save. On a bad op nothing changes.
     /// A pane the op created is snapshotted after the layout, so clients have mounted it.
+    /// A pane the op dropped loses its bus subscriptions.
     pub fn apply(
         &self,
         op: Op,
@@ -178,6 +194,7 @@ impl Space {
             Op::Join { pane } => {
                 space.layout.join(pane)?;
                 space.panes.remove(&pane);
+                space.bus.unsubscribe(pane);
                 None
             }
             Op::Swap { a, b } => {
@@ -189,6 +206,14 @@ impl Space {
                 None
             }
             Op::Change { pane, kind } => {
+                if !space.panes.contains_key(&pane) {
+                    return Err(anyhow!("No pane {pane}"));
+                }
+                if !space.registry.kinds().contains(&kind.as_str()) {
+                    return Err(anyhow!("Unknown pane kind {kind}"));
+                }
+                // Before `make`, which subscribes the new pane under the same id.
+                space.bus.unsubscribe(pane);
                 let p = space.make(&kind, pane)?;
                 space.layout.change(pane, kind)?;
                 space.panes.insert(pane, p);
@@ -201,6 +226,7 @@ impl Space {
                 .tx
                 .send(pane_frame(pane, space.panes[&pane].snapshot()));
         }
+        space.settle()?;
         space.save()
     }
 }
@@ -211,7 +237,37 @@ impl SpaceInner {
         kind: &str,
         id: PaneId,
     ) -> Result<Box<dyn AnyPane>> {
-        self.registry.make(kind, Value::Null, ctx(&self.dir, id))
+        self.registry
+            .make(kind, Value::Null, ctx(&self.dir, &self.bus, id))
+    }
+    /// Deliver what the last update put on the bus to the panes subscribed, fan out what
+    /// they emit, then save the retained topics. A pane hearing a message may publish
+    /// another, so this loops; a conversation that never settles is cut off.
+    fn settle(&mut self) -> Result<()> {
+        for _round in 0..16 {
+            let queued = self.bus.take_queued();
+            if queued.is_empty() {
+                return self.bus.save();
+            }
+            for (id, topic, msg) in queued {
+                let Some(pane) = self.panes.get_mut(&id) else {
+                    continue;
+                };
+                let events = match pane.on_message(&topic, msg) {
+                    Ok(events) => events,
+                    Err(err) => {
+                        warn!("pane {id} on {topic}: {err}");
+                        continue;
+                    }
+                };
+                for event in events {
+                    let _ = self.tx.send(pane_frame(id, event));
+                }
+            }
+        }
+        warn!("bus still busy after 16 rounds, dropping the rest");
+        self.bus.take_queued();
+        self.bus.save()
     }
     fn save(&self) -> Result<()> {
         let path = self.dir.join("layout.json");
@@ -219,7 +275,7 @@ impl SpaceInner {
         Ok(())
     }
     fn layout_json(&self) -> Value {
-        json!({ "layout": self.layout, "kinds": self.registry.kinds() })
+        json!({ "layout": self.layout, "kinds": self.registry.kinds(), "host": self.host })
     }
     fn layout_frame(&self) -> Frame {
         Frame {
@@ -231,11 +287,13 @@ impl SpaceInner {
 
 fn ctx(
     dir: &Path,
+    bus: &Arc<dyn Bus>,
     id: PaneId,
 ) -> Ctx {
     Ctx {
         id,
         storage: dir.join("panes").join(id.to_string()),
+        bus: PaneBus::new(id, bus.clone()),
     }
 }
 
