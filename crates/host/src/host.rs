@@ -113,13 +113,14 @@ impl Host {
         Ok(())
     }
     /// Apply a layout op, save, and broadcast the result. On error nothing changes.
+    /// A pane the op created is snapshotted after the layout, so clients have mounted it.
     pub fn apply(
         &self,
         op: Op,
     ) -> Result<()> {
         let mut host = self.0.lock().unwrap();
         debug!("{op:?}");
-        match op {
+        let created = match op {
             Op::Split {
                 pane,
                 axis,
@@ -129,22 +130,33 @@ impl Host {
                 let p = host.make(&kind, new_pane)?;
                 host.layout.split(pane, axis, new_pane, kind)?;
                 host.panes.insert(new_pane, p);
+                Some(new_pane)
             }
             Op::Join { pane } => {
                 host.layout.join(pane)?;
                 host.panes.remove(&pane);
+                None
             }
-            Op::Swap { a, b } => host.layout.swap(a, b)?,
-            Op::Resize { path, ratio } => host.layout.resize(&path, ratio)?,
+            Op::Swap { a, b } => {
+                host.layout.swap(a, b)?;
+                None
+            }
+            Op::Resize { path, ratio } => {
+                host.layout.resize(&path, ratio)?;
+                None
+            }
             Op::Change { pane, kind } => {
                 let p = host.make(&kind, pane)?;
                 host.layout.change(pane, kind)?;
                 host.panes.insert(pane, p);
-                let _ = host.tx.send(pane_frame(pane, host.panes[&pane].snapshot()));
+                Some(pane)
             }
-        }
+        };
         host.save()?;
         let _ = host.tx.send(host.layout_frame());
+        if let Some(pane) = created {
+            let _ = host.tx.send(pane_frame(pane, host.panes[&pane].snapshot()));
+        }
         Ok(())
     }
 }
