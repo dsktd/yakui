@@ -1,0 +1,7 @@
+[package]
+name = "pane-clock"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pane-api = { path = "../pane-api" }
