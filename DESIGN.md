@@ -236,6 +236,44 @@ the workspace for every pane; no pane imports another pane's module in JS;
 every widget module has no imports except other widgets; the topics each
 pane depends on are written down in its README section.
 
+## Distributed: Iroh (decided 2026-11-01, after the gallery)
+
+Cal: run yakui across several PCs, each hosting its own panes, all on one
+bus. Iroh over libp2p: Rust-native, QUIC by node id with relays and hole
+punching, and it ships both halves of the bus split.
+
+- **Transient topics** ride `iroh-gossip`, one gossip topic per
+  `<space>/<topic>`. Fire and forget, as now.
+- **Retained topics** ride `iroh-docs`: an eventually consistent key-value
+  store with set-reconciliation sync, so a joining host receives the
+  current `scene` and `selection`. Standard retained topics keep one
+  **authority** (the host that owns the topic applies commands, stamps
+  `seq`, writes the doc entry); other hosts forward `cmd` to it. Private
+  retained topics are last-write-wins per key as iroh-docs does.
+- **Remote panes**: the shell still talks only to its local host. A layout
+  leaf may name a pane on another host (`<host-id>/<pane>`); the local host
+  fetches that pane's module and relays its msgs and events over an iroh
+  connection (request/response stream), so the pane trait and the client
+  never learn about the network.
+- **Blobs** (`iroh-blobs`) for large assets later: meshes, textures, scene
+  files by content hash. Not v1 of this milestone.
+- **Membership**: a space is a ticket (space id + authority node id +
+  relay); joining a space = dialling the ticket. Invite by sharing the
+  ticket, like a share link today. Encryption and peer identity are iroh's.
+
+Hooks already in the gallery build so this is a drop-in: the bus behind a
+`Bus` trait (in-process impl now, `IrohBus` later), `{seq, origin}` on every
+retained message, pane ids unique beyond one host.
+
+Milestone order: gallery (#81) lands first, then `IrohBus` as its own
+tracker item, behind a feature flag / config, with the in-process bus
+staying the default for a single PC.
+
+Open: iroh crate versions move fast (gossip/docs/blobs are separate crates
+since iroh 0.28; check crates.io at build time); whether `iroh-docs` stays
+maintained in its current shape, else retained topics go over gossip with
+authority-stamped seq plus a sync request on join.
+
 ## Future option: WASM panes (parked)
 
 Cal wants this kept in mind in case the project pivots toward untrusted or
