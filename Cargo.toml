@@ -5,6 +5,7 @@ edition = "2024"
 [workspace]
 resolver = "3"
 members = [
+	"crates/host",
 	"crates/pane-api",
 	"crates/pane-clock",
 	"crates/pane-notes",

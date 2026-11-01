@@ -1,0 +1,10 @@
+[package]
+name = "host"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pane-api = { path = "../pane-api" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
