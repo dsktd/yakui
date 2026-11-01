@@ -10,6 +10,7 @@ members = [
 	"crates/pane-clock",
 	"crates/pane-notes",
 	"crates/pane-view2d",
+	"crates/pane-view3d",
 	"crates/shell-tauri",
 ]
 # shell-tauri needs webkitgtk; build it on purpose with -p shell-tauri.
@@ -19,6 +20,7 @@ default-members = [
 	"crates/pane-clock",
 	"crates/pane-notes",
 	"crates/pane-view2d",
+	"crates/pane-view3d",
 ]
 
 [workspace.dependencies]
