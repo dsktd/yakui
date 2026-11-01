@@ -29,7 +29,9 @@ function home() {
     id = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
     try { localStorage.setItem('space', id); } catch {}
   }
-  location.replace(new URL(`s/${id}/`, base));
+  const url = new URL(`s/${id}/`, base);
+  url.search = location.search;
+  location.replace(url);
 }
 
 // The space's link, to hand to another client; copied too where the browser allows it.
