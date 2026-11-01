@@ -3,8 +3,10 @@
 
 // Every URL derives from where this module was served, so a proxy may mount the host under any prefix.
 const base = new URL('.', import.meta.url);
-const single = location.pathname.match(/\/pane\/(\d+)$/);
-const only = single ? Number(single[1]) : null;
+// `/s/<space>/` or `/s/<space>/pane/<id>`; anything else is the root, which goes to this browser's own space.
+const at = location.pathname.match(/\/s\/([a-z0-9]+)\/(?:pane\/(\d+))?$/);
+const space = at ? at[1] : null;
+const only = at && at[2] ? Number(at[2]) : null;
 const roParam = new URLSearchParams(location.search).get('ro');
 const ro = roParam !== null && roParam !== '0' && roParam !== 'false';
 const strip = document.getElementById('strip');
@@ -17,8 +19,20 @@ let kinds = [];
 const panes = new Map();   // id -> { el, kind, listeners, pending, unmount, select }
 const handles = new Map(); // path string -> element
 
+// The id is made once per browser and kept; a reload or another tab lands in the same space.
+function home() {
+  let id = localStorage.getItem('space');
+  if (!id) {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    id = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    localStorage.setItem('space', id);
+  }
+  location.replace(new URL(`s/${id}/`, base));
+}
+
 function connect() {
   const q = new URLSearchParams();
+  q.set('space', space);
   if (only !== null) q.set('pane', only);
   if (ro) q.set('ro', '1');
   const url = new URL('ws', base);
@@ -278,4 +292,5 @@ function bar(id, kind, pane) {
   return el;
 }
 
-connect();
+if (space === null) home();
+else connect();

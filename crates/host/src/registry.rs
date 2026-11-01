@@ -48,12 +48,13 @@ fn make<P: Pane>(
     Ok(Box::new(P::new(config, ctx)))
 }
 
+#[derive(Clone)]
 struct Kind {
     make: Make,
     module: &'static str,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Registry(BTreeMap<&'static str, Kind>);
 impl Registry {
     pub fn add<P: Pane>(&mut self) {

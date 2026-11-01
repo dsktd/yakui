@@ -44,8 +44,10 @@ subscriber.
   space.
 - Opt-in sharing: the space id is in the URL, `/s/<space>/` and
   `/s/<space>/pane/<id>` (pane ids are per space). Opening another client's
-  link joins that space; a "share" action in the shell shows the link. `/`
-  redirects to the client's own space, creating it on first visit.
+  link joins that space; a "share" action in the shell shows the link. The
+  shell at `/` goes to the client's own space (the id lives in the browser,
+  so the host cannot redirect); the host makes a space on its first
+  connection.
 - Read-only stays a per-connection flag (`?ro=1`), so a shared link can be a
   passive mirror.
 - The Tauri window is a webview with its own storage, so a separate client
@@ -156,9 +158,10 @@ that pane. A new client gets the layout and each visible pane's `snapshot()`.
 Reconnect is automatic with a fresh snapshot; the client shows a thin
 "reconnecting" strip rather than freezing.
 
-URLs: `/` full layout, `/pane/<id>` one pane filling the viewport (the mobile
-case), `/ws`. The web client is one small shell that mounts each pane's ES
-module into its rect.
+URLs: `/s/<space>/` full layout, `/s/<space>/pane/<id>` one pane filling the
+viewport (the mobile case), `/ws?space=<space>`; `/` is the shell too, which
+goes to the browser's own space. The web client is one small shell that
+mounts each pane's ES module into its rect.
 
 ### Remote access and auth
 
