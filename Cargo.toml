@@ -14,6 +14,7 @@ members = [
 	"crates/pane-palette",
 	"crates/pane-view2d",
 	"crates/pane-view3d",
+	"crates/pane-widgets",
 	"crates/shell-tauri",
 ]
 # shell-tauri needs webkitgtk; build it on purpose with -p shell-tauri.
@@ -27,6 +28,7 @@ default-members = [
 	"crates/pane-palette",
 	"crates/pane-view2d",
 	"crates/pane-view3d",
+	"crates/pane-widgets",
 ]
 
 [workspace.dependencies]
