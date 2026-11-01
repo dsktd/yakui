@@ -7,14 +7,14 @@ use pane_api::Out;
 use pane_api::Pane;
 use pane_api::protocol::Command;
 use pane_api::protocol::Object;
+use pane_api::protocol::Protocol;
+use pane_api::protocol::Rejected;
 use pane_api::protocol::Scene;
 use pane_api::protocol::Selection;
 use pane_api::protocol::Topic;
-use pane_api::protocol::VERSION;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
-use serde_json::json;
 
 #[derive(Serialize, Deserialize)]
 pub enum Msg {
@@ -36,7 +36,7 @@ pub enum Event {
         reason: String,
     },
     Unsupported {
-        version: Value,
+        version: u32,
     },
 }
 
@@ -99,16 +99,16 @@ impl Pane for Inspector {
                 self.selection = Selection::from_message(&msg.value);
                 out.emit(self.snapshot());
             }
-            Topic::PROTOCOL if msg.value["version"] != json!(VERSION) => {
-                out.emit(Event::Unsupported {
-                    version: msg.value["version"].clone(),
-                });
+            Topic::PROTOCOL => {
+                let protocol = Protocol::from_message(&msg.value);
+                if !protocol.supported() {
+                    out.emit(Event::Unsupported {
+                        version: protocol.version,
+                    });
+                }
             }
             _ if topic == self.rejected => out.emit(Event::Rejected {
-                reason: msg.value["reason"]
-                    .as_str()
-                    .unwrap_or("rejected")
-                    .to_owned(),
+                reason: Rejected::reason(&msg.value),
             }),
             _ => {}
         }

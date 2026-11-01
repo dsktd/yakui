@@ -9,14 +9,14 @@ use pane_api::protocol::Command;
 use pane_api::protocol::Focus;
 use pane_api::protocol::Hover;
 use pane_api::protocol::Object;
+use pane_api::protocol::Protocol;
+use pane_api::protocol::Rejected;
 use pane_api::protocol::Scene;
 use pane_api::protocol::Selection;
 use pane_api::protocol::Topic;
-use pane_api::protocol::VERSION;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
-use serde_json::json;
 
 /// The pan and zoom at rest, shared by every view2d of the space and kept across reloads.
 const VIEW: &str = "view2d/view";
@@ -59,7 +59,7 @@ pub enum Event {
         reason: String,
     },
     Unsupported {
-        version: Value,
+        version: u32,
     },
 }
 
@@ -136,9 +136,10 @@ impl Pane for View2d {
                 });
             }
             Topic::PROTOCOL => {
-                if msg.value["version"] != json!(VERSION) {
+                let protocol = Protocol::from_message(&msg.value);
+                if !protocol.supported() {
                     out.emit(Event::Unsupported {
-                        version: msg.value["version"].clone(),
+                        version: protocol.version,
                     });
                     return;
                 }
@@ -162,10 +163,7 @@ impl Pane for View2d {
                 });
             }
             _ if topic == self.rejected => out.emit(Event::Rejected {
-                reason: msg.value["reason"]
-                    .as_str()
-                    .unwrap_or("rejected")
-                    .to_owned(),
+                reason: Rejected::reason(&msg.value),
             }),
             _ => {}
         }

@@ -252,8 +252,8 @@ impl LocalInner {
     fn scene(&self) -> Result<Scene> {
         match self.retained.get(Topic::SCENE) {
             None => Ok(Scene::default()),
-            Some(msg) => Ok(serde_json::from_value(msg.value.clone())
-                .or(Err(anyhow!("The scene topic is malformed")))?),
+            Some(msg) => serde_json::from_value(msg.value.clone())
+                .or(Err(anyhow!("The scene topic is malformed"))),
         }
     }
     fn retain_scene(

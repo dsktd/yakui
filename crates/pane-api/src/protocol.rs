@@ -70,6 +70,20 @@ fn grey() -> String {
     "#888888".to_owned()
 }
 
+/// The `protocol` message. A malformed one reads as version 0, which no pane supports.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct Protocol {
+    pub version: u32,
+}
+impl Protocol {
+    pub fn from_message(msg: &Value) -> Self {
+        serde_json::from_value(msg.clone()).unwrap_or_default()
+    }
+    pub fn supported(&self) -> bool {
+        self.version == VERSION
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct Scene {
     pub objects: Vec<Object>,
@@ -83,7 +97,7 @@ impl Scene {
             return scene;
         };
         for object in objects {
-            let Ok(object) = serde_json::from_value::<Object>(object.clone()) else {
+            let Ok(object) = Object::deserialize(object) else {
                 continue;
             };
             if object.id.is_empty() {
@@ -164,6 +178,12 @@ pub struct Rejected {
     pub cmd: Command,
     pub reason: String,
 }
+impl Rejected {
+    /// The reason alone, whatever else the message holds.
+    pub fn reason(msg: &Value) -> String {
+        msg["reason"].as_str().unwrap_or("rejected").to_owned()
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -227,5 +247,13 @@ mod test {
         assert!(!Topic::is_standard("view3d/camera"));
         assert!(Selection::from_message(&json!(["a"])).ids.is_empty());
         assert_eq!(Hover::from_message(&json!({ "id": null })).id, None);
+        assert!(Protocol::from_message(&json!({ "version": 1 })).supported());
+        assert!(!Protocol::from_message(&json!({ "version": 2 })).supported());
+        assert_eq!(Protocol::from_message(&json!("banana")).version, 0);
+        assert_eq!(
+            Rejected::reason(&json!({ "reason": "No object a" })),
+            "No object a"
+        );
+        assert_eq!(Rejected::reason(&json!(3)), "rejected");
     }
 }

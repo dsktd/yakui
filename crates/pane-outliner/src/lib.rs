@@ -8,14 +8,13 @@ use pane_api::Pane;
 use pane_api::protocol::Command;
 use pane_api::protocol::Focus;
 use pane_api::protocol::Hover;
+use pane_api::protocol::Protocol;
+use pane_api::protocol::Rejected;
 use pane_api::protocol::Scene;
 use pane_api::protocol::Selection;
 use pane_api::protocol::Topic;
-use pane_api::protocol::VERSION;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value;
-use serde_json::json;
 
 #[derive(Serialize, Deserialize)]
 pub enum Msg {
@@ -36,7 +35,7 @@ pub enum Event {
     State { scene: Scene, selection: Selection },
     Hover { hover: Hover },
     Rejected { reason: String },
-    Unsupported { version: Value },
+    Unsupported { version: u32 },
 }
 
 pub struct Outliner {
@@ -103,19 +102,19 @@ impl Pane for Outliner {
                 self.selection = Selection::from_message(&msg.value);
                 out.emit(self.snapshot());
             }
-            Topic::PROTOCOL if msg.value["version"] != json!(VERSION) => {
-                out.emit(Event::Unsupported {
-                    version: msg.value["version"].clone(),
-                });
+            Topic::PROTOCOL => {
+                let protocol = Protocol::from_message(&msg.value);
+                if !protocol.supported() {
+                    out.emit(Event::Unsupported {
+                        version: protocol.version,
+                    });
+                }
             }
             Topic::HOVER => out.emit(Event::Hover {
                 hover: Hover::from_message(&msg.value),
             }),
             _ if topic == self.rejected => out.emit(Event::Rejected {
-                reason: msg.value["reason"]
-                    .as_str()
-                    .unwrap_or("rejected")
-                    .to_owned(),
+                reason: Rejected::reason(&msg.value),
             }),
             _ => {}
         }
