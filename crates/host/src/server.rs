@@ -41,7 +41,7 @@ pub async fn serve(
 ) -> Result<()> {
     let app = Router::new()
         .route("/", get(index))
-        .route("/pane/{id}", get(index))
+        .route("/pane/{id}", get(pane_index))
         .route("/shell.js", get(shell_js))
         .route("/shell.css", get(shell_css))
         .route("/modules/{kind}", get(module))
@@ -54,8 +54,17 @@ pub async fn serve(
     Ok(())
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX)
+async fn index() -> Html<String> {
+    Html(INDEX.to_string())
+}
+
+/// One level deep, so relative URLs need `..` to reach the root, behind any proxy prefix.
+async fn pane_index() -> Html<String> {
+    Html(with_base(INDEX))
+}
+
+fn with_base(html: &str) -> String {
+    html.replacen("<head>", "<head>\n  <base href=\"../\">", 1)
 }
 
 async fn shell_js() -> Response {
@@ -183,5 +192,18 @@ async fn connection(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pane_page_points_back_to_root() {
+        let html = with_base(INDEX);
+        assert!(html.contains("<head>\n  <base href=\"../\">"));
+        assert!(!INDEX.contains("<base"));
+        assert!(!INDEX.contains("=\"/"));
     }
 }

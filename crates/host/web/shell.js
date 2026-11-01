@@ -1,7 +1,9 @@
 // The shell: one WebSocket, the layout tree, and a shadow root per pane.
 // Layout ops apply here first; the host answers with the whole layout.
 
-const single = location.pathname.match(/^\/pane\/(\d+)$/);
+// Every URL derives from where this module was served, so a proxy may mount the host under any prefix.
+const base = new URL('.', import.meta.url);
+const single = location.pathname.match(/\/pane\/(\d+)$/);
 const only = single ? Number(single[1]) : null;
 const roParam = new URLSearchParams(location.search).get('ro');
 const ro = roParam !== null && roParam !== '0' && roParam !== 'false';
@@ -19,8 +21,10 @@ function connect() {
   const q = new URLSearchParams();
   if (only !== null) q.set('pane', only);
   if (ro) q.set('ro', '1');
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws?${q}`);
+  const url = new URL('ws', base);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.search = q;
+  ws = new WebSocket(url);
   ws.onopen = () => { strip.hidden = true; retry = 500; };
   ws.onclose = () => {
     strip.hidden = false;
@@ -236,7 +240,7 @@ function mount(id, kind) {
       for (const payload of held) cb(payload);
     },
   };
-  import(`/modules/${kind}`).then((mod) => {
+  import(new URL(`modules/${kind}`, base)).then((mod) => {
     if (panes.get(id) !== pane) return;
     pane.unmount = mod.mount(root, api) || null;
     pane.pending = null;
