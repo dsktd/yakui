@@ -1,0 +1,10 @@
+[package]
+name = "shell-tauri"
+version.workspace = true
+edition.workspace = true
+
+[build-dependencies]
+tauri-build = "2" # https://github.com/tauri-apps/tauri
+
+[dependencies]
+tauri = "2" # https://github.com/tauri-apps/tauri
