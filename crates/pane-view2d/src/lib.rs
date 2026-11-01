@@ -8,7 +8,6 @@ use pane_api::Pane;
 use pane_api::protocol::Command;
 use pane_api::protocol::Focus;
 use pane_api::protocol::Hover;
-use pane_api::protocol::Object;
 use pane_api::protocol::Protocol;
 use pane_api::protocol::Rejected;
 use pane_api::protocol::Scene;
@@ -69,9 +68,6 @@ pub struct View2d {
     scene: Scene,
     selection: Selection,
     view: Value,
-    /// A retained `scene` arrived; without one by the time `protocol` comes, the space is
-    /// fresh and this pane seeds it.
-    seen_scene: bool,
 }
 impl Pane for View2d {
     const KIND: &'static str = "view2d";
@@ -85,7 +81,7 @@ impl Pane for View2d {
         ctx: Ctx,
     ) -> Self {
         let rejected = Topic::rejected(ctx.id);
-        // Retained ones first, `protocol` after `scene`, so a missing scene is known by then.
+        // Retained ones first.
         for topic in [Topic::SCENE, Topic::SELECTION, VIEW, Topic::PROTOCOL] {
             ctx.bus.subscribe(topic);
         }
@@ -98,7 +94,6 @@ impl Pane for View2d {
             scene: Scene::default(),
             selection: Selection::default(),
             view: Value::Null,
-            seen_scene: false,
         }
     }
     fn update(
@@ -123,7 +118,6 @@ impl Pane for View2d {
     ) {
         match topic {
             Topic::SCENE => {
-                self.seen_scene = true;
                 self.scene = Scene::from_message(&msg.value);
                 out.emit(Event::Scene {
                     scene: self.scene.clone(),
@@ -141,10 +135,6 @@ impl Pane for View2d {
                     out.emit(Event::Unsupported {
                         version: protocol.version,
                     });
-                    return;
-                }
-                if !self.seen_scene {
-                    seed(&self.bus);
                 }
             }
             Topic::HOVER => out.emit(Event::Hover {
@@ -174,56 +164,5 @@ impl Pane for View2d {
             selection: self.selection.clone(),
             view: self.view.clone(),
         }
-    }
-}
-
-/// Four objects so a fresh space shows something. Fixed ids: a second viewport seeding at
-/// the same moment is refused object by object and the scene stays at four.
-fn seed(bus: &Bus) {
-    let objects = [
-        (
-            "seed-box",
-            "Box",
-            "box",
-            [-2.0, 0.0, 0.0],
-            [1.5, 1.5, 1.5],
-            "#e06c3a",
-        ),
-        (
-            "seed-ball",
-            "Ball",
-            "sphere",
-            [0.5, 0.5, 0.0],
-            [1.0, 1.0, 1.0],
-            "#3a8ee0",
-        ),
-        (
-            "seed-slab",
-            "Slab",
-            "box",
-            [0.0, -1.5, 0.0],
-            [6.0, 0.3, 4.0],
-            "#6b6b6b",
-        ),
-        (
-            "seed-lamp",
-            "Lamp",
-            "light",
-            [2.0, 2.0, 1.0],
-            [0.4, 0.4, 0.4],
-            "#ffe08a",
-        ),
-    ];
-    for (id, name, kind, position, size, color) in objects {
-        let object = Object {
-            id: id.to_owned(),
-            name: name.to_owned(),
-            kind: kind.to_owned(),
-            position,
-            size,
-            color: color.to_owned(),
-            ..Default::default()
-        };
-        bus.command(Command::AddObject { object });
     }
 }

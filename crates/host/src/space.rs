@@ -102,7 +102,9 @@ impl Space {
     ) -> Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
-        let bus: Arc<dyn Bus> = Arc::new(Local::open(dir.join("bus.json"), host)?);
+        let local = Local::open(dir.join("bus.json"), host)?;
+        local.seed();
+        let bus: Arc<dyn Bus> = Arc::new(local);
         let path = dir.join("layout.json");
         let layout = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)?,

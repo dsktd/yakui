@@ -14,8 +14,7 @@ with the wheel, drag an object to move it, click to select it, `fit` to see ever
   `View { view }`, `Rejected { reason }`, `Unsupported { version }`.
 - Topics subscribed: `scene`, `selection`, `protocol` (retained, standard); `hover`, `focus`,
   `rejected/<pane>` (transient, standard); `view2d/view` (retained, private).
-- Topics published: `cmd` with `select`, `move_object`, and four `add_object` to seed a
-  space that has no `scene` by the time `protocol` arrives; `hover`; `view2d/view` retained
+- Topics published: `cmd` with `select` and `move_object`; `hover`; `view2d/view` retained
   as `{ x, y, zoom }` (world units, pixels per unit), shared by every view2d in the space.
 - Widgets: toolbar (`fit`, `clear`).
 - Smoothness: pointer work (pan, zoom, drag, hover hit-testing) never leaves the browser;

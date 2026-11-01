@@ -109,6 +109,15 @@ impl Local {
         );
         Ok(Self(Arc::new(Mutex::new(inner))))
     }
+    /// Retain [`seed_scene`] if the bus has no `scene`, so a fresh space shows something
+    /// before its first subscriber gets its retained message.
+    pub fn seed(&self) {
+        let mut bus = self.0.lock().unwrap();
+        if bus.retained.contains_key(Topic::SCENE) {
+            return;
+        }
+        let _ = bus.retain_scene(&seed_scene());
+    }
 }
 
 impl Bus for Local {
@@ -415,6 +424,57 @@ fn check_topic(
     }
 }
 
+/// Four objects, one definition for every viewport.
+fn seed_scene() -> Scene {
+    let objects = [
+        (
+            "seed-box",
+            "Box",
+            "box",
+            [-2.0, 0.0, 0.0],
+            [1.5, 1.5, 1.5],
+            "#e06c3a",
+        ),
+        (
+            "seed-ball",
+            "Ball",
+            "sphere",
+            [0.5, 0.5, 0.0],
+            [1.0, 1.0, 1.0],
+            "#3a8ee0",
+        ),
+        (
+            "seed-slab",
+            "Slab",
+            "box",
+            [0.0, -1.5, 0.0],
+            [6.0, 0.3, 4.0],
+            "#6b6b6b",
+        ),
+        (
+            "seed-lamp",
+            "Lamp",
+            "light",
+            [2.0, 2.0, 1.0],
+            [0.4, 0.4, 0.4],
+            "#ffe08a",
+        ),
+    ];
+    let objects = objects
+        .into_iter()
+        .map(|(id, name, kind, position, size, color)| Object {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            kind: kind.to_owned(),
+            position,
+            size,
+            color: color.to_owned(),
+            ..Default::default()
+        })
+        .collect();
+    Scene { objects }
+}
+
 fn check_size(value: &Value) -> Result<()> {
     let size = value.to_string().len();
     if size > MAX_RETAINED {
@@ -706,6 +766,28 @@ mod test {
                 .unwrap()
                 .contains("over")
         );
+    }
+
+    #[test]
+    fn test_seed() {
+        let path = tmp();
+        let bus = open(&path);
+        bus.seed();
+        bus.subscribe(pid(2), Topic::SCENE);
+        let queued = bus.take_queued();
+        assert_eq!(topics(&queued), vec![(2, "scene")]);
+        assert_eq!(Scene::from_message(&queued[0].2.value).objects.len(), 4);
+        // A scene already there, even an empty one, is left alone.
+        command(
+            &bus,
+            pid(1),
+            Command::RemoveObjects {
+                ids: seed_scene().objects.into_iter().map(|o| o.id).collect(),
+            },
+        );
+        let scene = bus.retained(Topic::SCENE).unwrap();
+        bus.seed();
+        assert_eq!(bus.retained(Topic::SCENE), Some(scene));
     }
 
     #[test]
