@@ -209,6 +209,9 @@ impl Space {
                 if !space.panes.contains_key(&pane) {
                     return Err(anyhow!("No pane {pane}"));
                 }
+                if !space.registry.kinds().contains(&kind.as_str()) {
+                    return Err(anyhow!("Unknown pane kind {kind}"));
+                }
                 // Before `make`, which subscribes the new pane under the same id.
                 space.bus.unsubscribe(pane);
                 let p = space.make(&kind, pane)?;
