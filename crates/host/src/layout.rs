@@ -100,6 +100,59 @@ impl Node {
         *self = std::mem::replace(&mut **keep, Node::leaf(pane));
         true
     }
+    /// Push the position of every `axis` edge in this node, spanning `lo..hi`, into `into`.
+    fn edges(
+        &self,
+        axis: Axis,
+        lo: f32,
+        hi: f32,
+        into: &mut Vec<f32>,
+    ) {
+        let Node::Split {
+            axis: own,
+            ratio,
+            a,
+            b,
+        } = self
+        else {
+            return;
+        };
+        if *own != axis {
+            a.edges(axis, lo, hi, into);
+            b.edges(axis, lo, hi, into);
+            return;
+        }
+        let at = lo + (hi - lo) * ratio;
+        into.push(at);
+        a.edges(axis, lo, at, into);
+        b.edges(axis, at, hi, into);
+    }
+    /// Move this node's span from `from` to `to` along `axis`, keeping every inner edge in place.
+    fn rescale(
+        &mut self,
+        axis: Axis,
+        from: (f32, f32),
+        to: (f32, f32),
+    ) {
+        let Node::Split {
+            axis: own,
+            ratio,
+            a,
+            b,
+        } = self
+        else {
+            return;
+        };
+        if *own != axis {
+            a.rescale(axis, from, to);
+            b.rescale(axis, from, to);
+            return;
+        }
+        let at = from.0 + (from.1 - from.0) * *ratio;
+        *ratio = (at - to.0) / (to.1 - to.0);
+        a.rescale(axis, (from.0, at), (to.0, at));
+        b.rescale(axis, (at, from.1), (at, to.1));
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -113,6 +166,9 @@ pub struct Layout {
     pub root: Node,
     pub panes: BTreeMap<PaneId, Entry>,
 }
+
+/// The smallest share of its split a pane can be dragged to.
+const MIN: f32 = 0.05;
 
 /// The Blender set. Clients apply these first; the host confirms with the whole [`Layout`].
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -225,10 +281,26 @@ impl Layout {
                 Side::B => b,
             };
         }
-        let Node::Split { ratio: r, .. } = node else {
+        let Node::Split {
+            axis,
+            ratio: old,
+            a,
+            b,
+        } = node
+        else {
             return Err(anyhow!("Path {path:?} ends on a leaf"));
         };
-        *r = ratio.clamp(0.05, 0.95);
+        // Only the panes on either side of this edge change: the edges nested in `a` and `b`
+        // keep their place, so the new edge stops `MIN` short of the nearest one.
+        let (mut inner_a, mut inner_b) = (Vec::new(), Vec::new());
+        a.edges(*axis, 0.0, *old, &mut inner_a);
+        b.edges(*axis, *old, 1.0, &mut inner_b);
+        let low = inner_a.into_iter().fold(0.0, f32::max) + MIN;
+        let high = inner_b.into_iter().fold(1.0, f32::min) - MIN;
+        let new = ratio.clamp(low, high.max(low));
+        a.rescale(*axis, (0.0, *old), (0.0, new));
+        b.rescale(*axis, (*old, 1.0), (new, 1.0));
+        *old = new;
         Ok(())
     }
     pub fn change(
@@ -306,5 +378,47 @@ mod test {
             unreachable!()
         };
         assert_eq!(ratio, 0.95);
+    }
+
+    /// Absolute right edges of the three leaves in `| 1 | 2 | 3 |`.
+    fn edges(layout: &Layout) -> Vec<f32> {
+        let mut out = Vec::new();
+        layout.root.edges(Axis::Vertical, 0.0, 1.0, &mut out);
+        out
+    }
+
+    fn three() -> Layout {
+        let mut layout = two();
+        layout
+            .split(pid(2), Axis::Vertical, pid(3), "clock")
+            .unwrap();
+        layout.resize(&[], 0.3).unwrap();
+        layout
+    }
+
+    #[test]
+    fn test_resize_moves_one_edge() {
+        let mut layout = three();
+        let before = edges(&layout);
+        layout.resize(&[], 0.4).unwrap();
+        let after = edges(&layout);
+        assert_eq!(after[0], 0.4);
+        // The second edge stays, so the third pane keeps its width and the first two their sum.
+        assert!((after[1] - before[1]).abs() < 1e-6);
+
+        let before = edges(&layout);
+        layout.resize(&[Side::B], 0.25).unwrap();
+        let after = edges(&layout);
+        assert_eq!(after[0], before[0]);
+    }
+
+    #[test]
+    fn test_resize_clamps_at_neighbour() {
+        let mut layout = three();
+        let before = edges(&layout);
+        layout.resize(&[], 0.99).unwrap();
+        let after = edges(&layout);
+        assert!((after[0] - (before[1] - MIN)).abs() < 1e-6);
+        assert!((after[1] - before[1]).abs() < 1e-6);
     }
 }

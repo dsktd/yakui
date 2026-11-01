@@ -220,6 +220,46 @@ function setRect(el, r) {
   el.style.height = `${r.h * 100}%`;
 }
 
+// Every `axis` edge in `node`, spanning lo..hi, as positions in the same units.
+function edges(node, axis, lo, hi, into) {
+  if ('Leaf' in node) return into;
+  const { axis: own, ratio, a, b } = node.Split;
+  if (own !== axis) {
+    edges(a, axis, lo, hi, into);
+    return edges(b, axis, lo, hi, into);
+  }
+  const at = lo + (hi - lo) * ratio;
+  into.push(at);
+  edges(a, axis, lo, at, into);
+  return edges(b, axis, at, hi, into);
+}
+
+// Move `node`'s span from `from` to `to` along `axis`, keeping every inner edge in place.
+function rescale(node, axis, from, to) {
+  if ('Leaf' in node) return;
+  const s = node.Split;
+  if (s.axis !== axis) {
+    rescale(s.a, axis, from, to);
+    return rescale(s.b, axis, from, to);
+  }
+  const at = from[0] + (from[1] - from[0]) * s.ratio;
+  s.ratio = (at - to[0]) / (to[1] - to[0]);
+  rescale(s.a, axis, [from[0], at], [to[0], at]);
+  rescale(s.b, axis, [at, from[1]], [at, to[1]]);
+}
+
+// Mirrors Layout::resize: only the two panes beside this edge change size.
+function resize(node, ratio) {
+  const s = node.Split;
+  const old = s.ratio;
+  const low = Math.max(0, ...edges(s.a, s.axis, 0, old, [])) + 0.05;
+  const high = Math.min(1, ...edges(s.b, s.axis, old, 1, [])) - 0.05;
+  const r = Math.min(Math.max(high, low), Math.max(low, ratio));
+  rescale(s.a, s.axis, [0, old], [0, r]);
+  rescale(s.b, s.axis, [old, 1], [r, 1]);
+  s.ratio = r;
+}
+
 function drag(e, el) {
   el.setPointerCapture(e.pointerId);
   const box = area.getBoundingClientRect();
@@ -228,7 +268,7 @@ function drag(e, el) {
     const ratio = vertical
       ? ((e.clientX - box.left) / box.width - rect.x) / rect.w
       : ((e.clientY - box.top) / box.height - rect.y) / rect.h;
-    el.node.Split.ratio = Math.min(0.95, Math.max(0.05, ratio));
+    resize(el.node, ratio);
     render();
   };
   const up = () => {
