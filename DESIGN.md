@@ -294,6 +294,43 @@ since iroh 0.28; check crates.io at build time); whether `iroh-docs` stays
 maintained in its current shape, else retained topics go over gossip with
 authority-stamped seq plus a sync request on join.
 
+## Drags: streams, grabs and rollback (2026-11-02)
+
+Cal's spec, hand-rolled (no ggrs, lightyear or naia):
+
+- **Stream, then commit.** While dragging, view2d publishes the object on
+  the transient `drag/<id>` once per pointer move; the drop is still one
+  `move_object`, so `scene` only ever holds final positions. The host paces
+  each `drag/<id>` to 60 Hz, holding back the latest (a tick from every
+  open connection flushes it) and discarding a held one once the object is
+  dropped or let go, so no sample lands after the final position.
+- **Draw behind, snap forward.** Receivers draw a stream through
+  `interpolate(topic)` in `web/protocol.js`: three samples, drawn one
+  sample interval behind the newest, at most 100 ms of extrapolation when
+  samples stop, and a snap (eased over 150 ms) when `scene` changes or
+  `owners` drops the object. Positions only: objects have no rotation yet,
+  so there is no slerp. `node crates/host/tests/interpolate.mjs` tests it.
+- **Grab with rollback.** `grab`/`release` are commands, decided by the
+  host in arrival order into the retained `owners` map (one map, since
+  there are no wildcard subscriptions). The dragging pane predicts its grab
+  from the first move; a lost grab comes back as an ordinary rejection of
+  the `grab`, and the loser drops its prediction, flashes the object's
+  outline and eases over to the holder's stream. Only the holder's drags
+  pass the host, and only the holder may `move_object` a held object. A
+  holder lets go on `release`, when its pane goes, or when the client
+  connection that last drove its pane closes; `owners` starts empty on
+  every host start.
+
+Later sync slots in beside this rather than replacing it: every transient
+message carries `{origin, ts}` (a monotonic clock per host) and every
+retained one `{origin, seq}`, so a stream can be reordered and spaced per
+origin and a retained topic's versions ordered per origin, which is what a
+CRDT (a per-object last-writer-wins register keyed by `(seq, origin)`) or a
+lightyear-style replication layer needs as input. The host stays the one
+authority for `owners`, so with `IrohBus` a grab is forwarded to the
+authority like any other command, and `drag/<id>` rides gossip as a
+transient topic.
+
 ## Future option: WASM panes (parked)
 
 Cal wants this kept in mind in case the project pivots toward untrusted or
