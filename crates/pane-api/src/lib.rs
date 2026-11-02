@@ -107,13 +107,17 @@ pub struct Ctx {
 }
 
 /// One message as the bus delivers it. A retained message also carries `seq`, which counts
-/// up per topic at its origin, so two hosts' copies of a topic can be ordered later.
+/// up per topic at its origin, so two hosts' copies of a topic can be ordered later. A
+/// transient one carries `ts` instead: when its origin published it, in milliseconds of that
+/// host's monotonic clock, so a stream of samples can be spaced in time.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Message {
     pub value: Value,
     pub origin: HostId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts: Option<u64>,
 }
 
 /// The host's side of the bus, one per space. The host implements it; panes only see it

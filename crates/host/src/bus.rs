@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use anyhow::anyhow;
 use log::debug;
@@ -81,6 +82,8 @@ pub struct Held {
 pub struct Local(Arc<Mutex<LocalInner>>);
 struct LocalInner {
     origin: HostId,
+    /// Where this bus's `ts` count from.
+    epoch: Instant,
     retained: BTreeMap<String, Message>,
     subscribers: BTreeMap<String, BTreeSet<PaneId>>,
     kinds: BTreeMap<PaneId, String>,
@@ -112,6 +115,7 @@ impl Local {
         }
         let mut inner = LocalInner {
             origin,
+            epoch: Instant::now(),
             retained,
             subscribers: BTreeMap::new(),
             kinds: BTreeMap::new(),
@@ -289,6 +293,7 @@ impl LocalInner {
             value,
             origin: self.origin,
             seq: None,
+            ts: None,
         };
         if retain {
             let last = self.retained.get(topic);
@@ -303,6 +308,8 @@ impl LocalInner {
             msg.seq = Some(seq);
             self.retained.insert(topic.to_owned(), msg.clone());
             self.dirty = true;
+        } else {
+            msg.ts = Some(self.epoch.elapsed().as_millis() as u64);
         }
         let panes = match self.subscribers.get(topic) {
             Some(panes) => panes.iter().copied().collect::<Vec<_>>(),
@@ -687,6 +694,8 @@ mod test {
         assert_eq!(queued[1].2.value, json!({ "version": 1 }));
         assert_eq!(queued[1].2.seq, Some(1));
         assert_eq!(queued[2].2.seq, None);
+        assert!(queued[1].2.ts.is_none());
+        assert!(queued[2].2.ts.is_some());
         assert!(queued.iter().all(|(_pane, _topic, msg)| msg.origin == HOST));
         assert!(bus.take_queued().is_empty());
         // Transient messages reach only current subscribers; the sender hears its own.
