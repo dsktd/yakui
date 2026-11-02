@@ -29,6 +29,9 @@ use pane_api::protocol::Topic;
 use pane_api::protocol::VERSION;
 use serde_json::Value;
 use serde_json::json;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::unbounded_channel;
 
 use crate::Result;
 
@@ -104,6 +107,8 @@ struct LocalInner {
     throttles: BTreeMap<String, Throttle>,
     path: PathBuf,
     dirty: bool,
+    /// Where this host's own messages go to reach other hosts, once [`Local::tap`] asked.
+    tap: Option<UnboundedSender<(String, Message)>>,
 }
 
 impl Local {
@@ -137,6 +142,7 @@ impl Local {
             throttles: BTreeMap::new(),
             path,
             dirty: false,
+            tap: None,
         };
         inner.publish(None, Topic::PROTOCOL, json!({ "version": VERSION }), true);
         // No pane holds anything across a restart.
@@ -156,6 +162,46 @@ impl Local {
             return;
         }
         let _ = bus.retain_scene(&seed_scene());
+    }
+    /// Every message this host publishes from now on, to carry to other hosts. Messages
+    /// put in with [`Local::deliver`] are not repeated here.
+    pub fn tap(&self) -> UnboundedReceiver<(String, Message)> {
+        let (tx, rx) = unbounded_channel();
+        self.0.lock().unwrap().tap = Some(tx);
+        rx
+    }
+    /// A message from another host: queue it for subscribers, and keep it if it is
+    /// retained and newer by `(seq, origin)` than the copy here. Returns whether it was
+    /// kept or delivered.
+    pub fn deliver(
+        &self,
+        topic: &str,
+        msg: Message,
+    ) -> bool {
+        let mut bus = self.0.lock().unwrap();
+        if let Some(seq) = msg.seq {
+            let newer = match bus.retained.get(topic) {
+                Some(last) => (seq, msg.origin) > (last.seq.unwrap_or(0), last.origin),
+                None => true,
+            };
+            if !newer {
+                return false;
+            }
+            bus.retained.insert(topic.to_owned(), msg.clone());
+            bus.dirty = true;
+        }
+        let panes = match bus.subscribers.get(topic) {
+            Some(panes) => panes.iter().copied().collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        for pane in panes {
+            bus.enqueue(pane, topic, msg.clone());
+        }
+        true
+    }
+    /// Every retained message, for a host that just joined.
+    pub fn snapshot(&self) -> BTreeMap<String, Message> {
+        self.0.lock().unwrap().retained.clone()
     }
 }
 
@@ -411,6 +457,9 @@ impl LocalInner {
         topic: &str,
         msg: Message,
     ) {
+        if let Some(tap) = &self.tap {
+            let _ = tap.send((topic.to_owned(), msg.clone()));
+        }
         let panes = match self.subscribers.get(topic) {
             Some(panes) => panes.iter().copied().collect::<Vec<_>>(),
             None => Vec::new(),
@@ -1399,5 +1448,36 @@ mod test {
         assert_eq!(partial.retained(Topic::SCENE), None);
         assert_eq!(partial.retained("view2d/view").unwrap().seq, Some(2));
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn deliver_keeps_the_newest() {
+        let bus = open(&tmp().join("bus.json"));
+        let mut tap = bus.tap();
+        bus.set_kind(pid(1), "view2d");
+        bus.subscribe(pid(1), "view2d/view");
+        bus.publish(pid(1), "view2d/view", json!({ "zoom": 2 }), true);
+        let (topic, mine) = tap.try_recv().unwrap();
+        assert_eq!((topic.as_str(), mine.seq), ("view2d/view", Some(1)));
+        let other = HostId(0xdef);
+        let msg = |zoom, seq| Message {
+            value: json!({ "zoom": zoom }),
+            origin: other,
+            seq: Some(seq),
+            ts: None,
+        };
+        // Same seq, higher origin wins; an older one is dropped.
+        assert!(bus.deliver("view2d/view", msg(3, 1)));
+        assert!(!bus.deliver("view2d/view", msg(4, 0)));
+        assert_eq!(
+            bus.retained("view2d/view").unwrap().value,
+            json!({ "zoom": 3 })
+        );
+        // Delivered messages are not tapped again; the next local write counts on.
+        assert!(tap.try_recv().is_err());
+        bus.publish(pid(1), "view2d/view", json!({ "zoom": 5 }), true);
+        assert_eq!(bus.retained("view2d/view").unwrap().seq, Some(2));
+        let queued = bus.take_queued();
+        assert_eq!(queued.len(), 3);
     }
 }
