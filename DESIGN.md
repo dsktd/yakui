@@ -295,6 +295,34 @@ since iroh 0.28; check crates.io at build time); whether `iroh-docs` stays
 maintained in its current shape, else retained topics go over gossip with
 authority-stamped seq plus a sync request on join.
 
+### IrohBus (built 2026-11-02, feature `iroh`)
+
+`host::iroh_bus::IrohBus` wraps a `Local` bus; `cargo build -p host --features
+iroh` adds it, the default build is unchanged. Pinned: `iroh` 1.4,
+`iroh-gossip` 0.101.
+
+- **One gossip topic per space** carries both kinds of message as JSON
+  `{ topic, msg }`. `Local::tap` hands out what this host publishes;
+  `Local::deliver` queues another host's for subscribers.
+- **Retained topics: a replica over gossip, not iroh-docs.** iroh-docs pulls
+  in iroh-blobs and a redb store, and keeps its own copy beside `bus.json`;
+  the bus already has one small retained map. Instead `seq` is a Lamport
+  count (one past the last, whichever host wrote it), a host keeps a copy
+  only if it is newer by `(seq, origin)`, and every host sends its retained
+  map to each new gossip neighbour. That converges without a second store.
+- **Join**: `IrohBus::join(local, ticket, relays)`; `ticket()` is base32 of
+  the gossip topic and this host's address. `Relays::Default` uses iroh's
+  public relays and address lookup (hosts behind NAT); `Relays::Off` dials
+  direct addresses only (LAN, tests).
+- Tested: two in-process hosts, relays off: a retained topic written before
+  the join converges, a transient message reaches the other host's
+  subscriber, a later write on either side wins on both.
+
+Left: `--join`/ticket flags on the host binary and `Space` choosing the bus;
+command authority for standard topics (today every host applies commands
+and the newest `scene` wins); remote pane modules and their msg/event relay;
+blobs.
+
 ## Drags: streams, grabs and rollback (2026-11-02)
 
 Cal's spec, hand-rolled (no ggrs, lightyear or naia):
@@ -325,7 +353,7 @@ Cal's spec, hand-rolled (no ggrs, lightyear or naia):
 Later sync slots in beside this rather than replacing it: every transient
 message carries `{origin, ts}` (a monotonic clock per host) and every
 retained one `{origin, seq}`, so a stream can be reordered and spaced per
-origin and a retained topic's versions ordered per origin, which is what a
+origin and a retained topic's versions ordered by `(seq, origin)`, which is what a
 CRDT (a per-object last-writer-wins register keyed by `(seq, origin)`) or a
 lightyear-style replication layer needs as input. The host stays the one
 authority for `owners`, so with `IrohBus` a grab is forwarded to the
