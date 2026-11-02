@@ -128,11 +128,12 @@ fn on_message(&mut self, topic: &str, msg: Message, out: &mut Out<Self::Event>)
 ```
 
 `Message` is `{ value, origin, seq?, ts? }`: the value, the id of the host it
-came from, for a retained message `seq`, a count per topic and origin, so two
-hosts' copies of a topic can be ordered later, and for a transient message
-`ts`, when its origin published it in milliseconds of that host's monotonic
-clock, so a stream of samples can be spaced in time (only differences within
-one origin mean anything). `on_message` is a trait method with
+came from, for a retained message `seq`, a Lamport count per topic (one past
+the last message, whichever host wrote it), so hosts agree on the newest copy
+of a topic by `(seq, origin)`, and for a transient message `ts`, when its
+origin published it in milliseconds of that host's monotonic clock, so a
+stream of samples can be spaced in time (only differences within one origin
+mean anything). `on_message` is a trait method with
 a default no-op, so a pane that never subscribes is unchanged. The tolerant
 readers in `pane-api::protocol` (`Scene::from_message`, `Protocol::supported`,
 `Rejected::reason`, ...) are how a pane reads a standard topic. Delivery order per space is arrival order; a slow

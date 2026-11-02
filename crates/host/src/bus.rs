@@ -335,11 +335,9 @@ impl LocalInner {
             if last.is_some_and(|last| last.value == msg.value) {
                 return;
             }
-            // Counts on from this host's own last message; another host's is its own count.
-            let seq = match last {
-                Some(last) if last.origin == self.origin => last.seq.unwrap_or(0) + 1,
-                _ => 1,
-            };
+            // A Lamport count: one past the last message, whichever host wrote it, so hosts
+            // sharing the topic agree on the newest by `(seq, origin)`.
+            let seq = last.and_then(|last| last.seq).unwrap_or(0) + 1;
             msg.seq = Some(seq);
             self.retained.insert(topic.to_owned(), msg.clone());
             self.dirty = true;
