@@ -2,9 +2,9 @@
 // are local; the Rust half hears one message per click, hover change and view at rest, and
 // for a drag a grab, one position per frame and a drop. Other panes' drags are drawn from
 // their stream through `interpolate`, and snap to the scene when it changes.
-import { mount as toolbar } from '../widgets/toolbar.js';
-import { Emits, Kind, interpolate, isColor, lerp } from '../protocol.js';
-import { flash } from '../note.js';
+import { mount as toolbar } from 'yakui/widgets/toolbar.js';
+import { Emits, Kind, interpolate, isColor, lerp } from 'yakui/protocol.js';
+import { flash } from 'yakui/note.js';
 
 // How long a cancelled drag or a snap eases into place, and a denied grab's outline shows.
 const TWEEN = 150;

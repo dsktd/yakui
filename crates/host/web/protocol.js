@@ -2,6 +2,11 @@
 // Topics and commands are the Rust half's business; a web half only needs the widget
 // event names, the shapes its own Rust half hands it, and how to draw a stream of them.
 
+// The protocol version, which is also the `lib/v<VERSION>/` this file and the widgets are
+// served under. The host fills it in from `pane_api::protocol::VERSION`; bumping that is how
+// a widget's props or emits change meaning (PROTOCOL.md "Shared web modules").
+export const VERSION = /*@VERSION*/ 0;
+
 // What a widget may emit. The pane decides what, if anything, to do with it.
 export const Emits = Object.freeze({
   SELECT: 'select', // { ids }

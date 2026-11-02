@@ -1,12 +1,12 @@
 // Every widget with sample props, and a log of what each emits. Where it makes sense the
 // emitted value is fed back through update(), so the widget shows the round trip.
-import { mount as toolbar } from '../widgets/toolbar.js';
-import { mount as propertyList } from '../widgets/property-list.js';
-import { mount as numberField } from '../widgets/number-field.js';
-import { mount as colorSwatch } from '../widgets/color-swatch.js';
-import { mount as paletteGrid } from '../widgets/palette-grid.js';
-import { mount as tree } from '../widgets/tree.js';
-import { Emits } from '../protocol.js';
+import { mount as toolbar } from 'yakui/widgets/toolbar.js';
+import { mount as propertyList } from 'yakui/widgets/property-list.js';
+import { mount as numberField } from 'yakui/widgets/number-field.js';
+import { mount as colorSwatch } from 'yakui/widgets/color-swatch.js';
+import { mount as paletteGrid } from 'yakui/widgets/palette-grid.js';
+import { mount as tree } from 'yakui/widgets/tree.js';
+import { Emits } from 'yakui/protocol.js';
 
 export function mount(root) {
   root.innerHTML = `<style>

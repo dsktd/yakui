@@ -1,8 +1,8 @@
 // The selected object's fields in a property list. A committed field is one Set message;
 // the object comes back through the scene, so nothing here is state of its own.
-import { mount as propertyList } from '../widgets/property-list.js';
-import { Emits } from '../protocol.js';
-import { flash } from '../note.js';
+import { mount as propertyList } from 'yakui/widgets/property-list.js';
+import { Emits } from 'yakui/protocol.js';
+import { flash } from 'yakui/note.js';
 
 export function mount(root, { send, onEvent }) {
   root.innerHTML = `<style>

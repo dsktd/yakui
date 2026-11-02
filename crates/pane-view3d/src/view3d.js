@@ -1,9 +1,9 @@
 // The scene in WebGL2: boxes and spheres with flat shading, an orbit camera, and picking by
 // rendering ids as colours. Orbit, zoom and hover picking are local; the Rust half hears one
 // message per click, hover change and camera at rest.
-import { mount as toolbar } from '../widgets/toolbar.js';
-import { Emits, Kind, isColor } from '../protocol.js';
-import { flash } from '../note.js';
+import { mount as toolbar } from 'yakui/widgets/toolbar.js';
+import { Emits, Kind, isColor } from 'yakui/protocol.js';
+import { flash } from 'yakui/note.js';
 
 const VS = `#version 300 es
 in vec3 position;
