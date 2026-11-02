@@ -198,8 +198,9 @@ export function mount(el, props, emit) -> { update(props), destroy() }
 
 Panes compose widgets; widgets never compose panes and never import other
 panes. A widget may import another widget. The host does not know widgets
-exist: they are served as static files from the pane or a shared `widgets/`
-directory of the host's web root.
+exist: they are served as static files from the host's versioned
+`/lib/v<n>/widgets/` (see "Shared web modules" in `PROTOCOL.md`), imported
+as `yakui/widgets/<name>.js` through the shell's import map.
 
 ### The bus
 

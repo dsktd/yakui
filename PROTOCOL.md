@@ -144,6 +144,24 @@ pane never blocks the bus (bounded queue; the host logs a drop).
 optional field) keep it, a changed meaning bumps it. A pane that does not
 know the version shows a message in the pane; it never panics.
 
+## 6. Shared web modules
+
+The widgets, `protocol.js` and `note.js` are a versioned contract, served at
+`/lib/v<protocol.version>/widgets/<name>.js`, `/lib/v<n>/protocol.js` and
+`/lib/v<n>/note.js`. The number is `pane_api::protocol::VERSION`, the same
+constant `protocol.js` exports as `VERSION`. A pane module imports them by
+bare specifier (`import { mount } from 'yakui/widgets/toolbar.js'`); the
+shell's import map (`{"imports":{"yakui/":"./lib/v1/"}}`) resolves `yakui/`.
+The map is relative, not an absolute `/lib/...`, because the app runs under a
+proxy prefix (`/yakui/`) where an absolute path would miss it.
+
+Each widget file opens with `// props:` and `// emits:` lines; a host test
+checks it. Changing what a widget's props or emits mean bumps `VERSION`;
+adding an optional prop or a new emit does not. A request for another
+version is a 404. The old `/widgets/<name>.js`, `/protocol.js` and
+`/note.js` redirect (307, relative) to the current version for one release,
+so a cached page still works; then they go.
+
 ## Not in v1
 
 Undo, transactions spanning commands, patches, wildcard subscriptions
