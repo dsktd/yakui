@@ -178,6 +178,10 @@ impl Space {
         }
         space.settle()
     }
+    /// Deliver what the bus held back (stream messages coming due) and fan out the result.
+    pub fn tick(&self) -> Result<()> {
+        self.0.lock().unwrap().settle()
+    }
     /// Client connection `conn` is gone: every pane it was the last to drive lets go of what
     /// it holds, so a dropped client cannot keep an object grabbed.
     pub fn disconnect(

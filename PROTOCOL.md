@@ -58,7 +58,9 @@ topic, an empty or malformed name) is dropped, and the host answers `rejected/<p
 starts empty whenever the host starts, so nothing stays held across a
 restart. `drag/<id>` streams a held object's transform while it is dragged,
 at most one message per frame; the host drops (silently, it is a stream) a
-`drag/<id>` from any pane but the holder. The drop itself is a
+`drag/<id>` from any pane but the holder, and paces each `drag/<id>` to at
+most 60 messages a second, holding back the latest one (with its original
+`ts`) and dropping older held ones. The drop itself is a
 `move_object`, so the retained `scene` has the final position; a receiver
 draws the stream between its own `scene` updates (`interpolate` in
 `protocol.js`) and snaps to `scene` when it changes.

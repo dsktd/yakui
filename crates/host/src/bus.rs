@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::anyhow;
@@ -37,6 +38,9 @@ const QUEUE: usize = 256;
 /// The most a retained value may take as JSON, so a pane cannot fill bus.json.
 const MAX_RETAINED: usize = 256 * 1024;
 
+/// The least time between two messages on one `drag/<id>`: 60 a second.
+pub const STREAM_INTERVAL: Duration = Duration::from_micros(16_667);
+
 /// What a space needs of its bus, beyond what panes see. [`Local`] is the only
 /// implementation; one that gossips with other hosts would be another.
 pub trait Bus: BusStore {
@@ -65,7 +69,8 @@ pub trait Bus: BusStore {
         pane: PaneId,
         held: Held,
     );
-    /// Everything queued, in arrival order per pane.
+    /// Everything queued, in arrival order per pane, after the held stream messages that are
+    /// due.
     fn take_queued(&self) -> Vec<(PaneId, String, Message)>;
     /// Record the kind of `pane`, whose prefix is the only private one it may write.
     fn set_kind(
@@ -94,6 +99,7 @@ struct LocalInner {
     subscribers: BTreeMap<String, BTreeSet<PaneId>>,
     kinds: BTreeMap<PaneId, String>,
     queues: BTreeMap<PaneId, VecDeque<(String, Message)>>,
+    throttles: BTreeMap<String, Throttle>,
     path: PathBuf,
     dirty: bool,
 }
@@ -126,6 +132,7 @@ impl Local {
             subscribers: BTreeMap::new(),
             kinds: BTreeMap::new(),
             queues: BTreeMap::new(),
+            throttles: BTreeMap::new(),
             path,
             dirty: false,
         };
@@ -217,6 +224,7 @@ impl Bus for Local {
     }
     fn take_queued(&self) -> Vec<(PaneId, String, Message)> {
         let mut bus = self.0.lock().unwrap();
+        bus.flush(Instant::now());
         let mut out = Vec::new();
         for (pane, queue) in std::mem::take(&mut bus.queues) {
             for (topic, msg) in queue {
@@ -331,13 +339,72 @@ impl LocalInner {
             self.retained.insert(topic.to_owned(), msg.clone());
             self.dirty = true;
         } else {
-            msg.ts = Some(self.epoch.elapsed().as_millis() as u64);
+            let now = Instant::now();
+            msg.ts = Some((now - self.epoch).as_millis() as u64);
+            if !self.throttle(topic, &msg, now) {
+                return;
+            }
         }
+        debug!("{from:?} -> {topic}");
+        self.fan_out(topic, msg);
+    }
+    /// Whether a transient message may go now. A `drag/<id>` within [`STREAM_INTERVAL`] of
+    /// the last one sent is held instead, replacing any held before it, until [`Self::flush`].
+    fn throttle(
+        &mut self,
+        topic: &str,
+        msg: &Message,
+        now: Instant,
+    ) -> bool {
+        if Topic::drag_id(topic).is_none() {
+            return true;
+        }
+        match self.throttles.get_mut(topic) {
+            Some(throttle) if now < throttle.sent + STREAM_INTERVAL => {
+                throttle.held = Some(msg.clone());
+                false
+            }
+            _ => {
+                let throttle = Throttle {
+                    sent: now,
+                    held: None,
+                };
+                self.throttles.insert(topic.to_owned(), throttle);
+                true
+            }
+        }
+    }
+    /// Send every held stream message whose interval is over; forget idle streams.
+    fn flush(
+        &mut self,
+        now: Instant,
+    ) {
+        let mut due = Vec::new();
+        self.throttles.retain(|topic, throttle| {
+            if now < throttle.sent + STREAM_INTERVAL {
+                return true;
+            }
+            let Some(msg) = throttle.held.take() else {
+                return false;
+            };
+            throttle.sent = now;
+            due.push((topic.clone(), msg));
+            true
+        });
+        for (topic, msg) in due {
+            self.fan_out(&topic, msg);
+        }
+    }
+    /// Queue `msg` for every subscriber of `topic`.
+    fn fan_out(
+        &mut self,
+        topic: &str,
+        msg: Message,
+    ) {
         let panes = match self.subscribers.get(topic) {
             Some(panes) => panes.iter().copied().collect::<Vec<_>>(),
             None => Vec::new(),
         };
-        debug!("{from:?} -> {topic} ({} subscribers)", panes.len());
         for pane in panes {
             self.enqueue(pane, topic, msg.clone());
         }
@@ -402,7 +469,12 @@ impl LocalInner {
         &mut self,
         owners: &Owners,
     ) -> Result<()> {
-        self.retain_checked(Topic::OWNERS, serde_json::to_value(owners).unwrap())
+        self.retain_checked(Topic::OWNERS, serde_json::to_value(owners).unwrap())?;
+        // A held drag of an object nobody holds now would land after its final position.
+        self.throttles.retain(|topic, _throttle| {
+            Topic::drag_id(topic).is_some_and(|id| owners.holder(id).is_some())
+        });
+        Ok(())
     }
     /// Drop every object `pane` holds.
     fn release(
@@ -507,6 +579,7 @@ impl LocalInner {
                 check_vector(position)?;
                 object.position = *position;
                 self.retain_scene(&scene)?;
+                self.throttles.remove(&Topic::drag(id));
             }
             Command::Grab { id } => {
                 if self.scene()?.object(id).is_none() {
@@ -537,6 +610,12 @@ impl LocalInner {
             _ => Ok(()),
         }
     }
+}
+
+/// One `drag/<id>`'s pace: when a message last went, and the latest one waiting since.
+struct Throttle {
+    sent: Instant,
+    held: Option<Message>,
 }
 
 /// What a pane of `kind` may publish, or retain if `retain`: the standard transient topics
@@ -1148,6 +1227,64 @@ mod test {
         command(&bus, pid(1), grab("a"));
         bus.unsubscribe(pid(1));
         assert_eq!(holder(&bus, "a"), None);
+    }
+
+    #[test]
+    fn test_drag_throttle_keeps_latest() {
+        let bus = open(&tmp());
+        bus.subscribe(pid(2), "drag/a");
+        let mut inner = bus.0.lock().unwrap();
+        let msg = |x| Message {
+            value: json!({ "id": "a", "position": [x, 0, 0] }),
+            origin: HOST,
+            seq: None,
+            ts: None,
+        };
+        let t0 = Instant::now();
+        let step = STREAM_INTERVAL / 4;
+        assert!(inner.throttle("drag/a", &msg(1), t0));
+        assert!(!inner.throttle("drag/a", &msg(2), t0 + step));
+        assert!(!inner.throttle("drag/a", &msg(3), t0 + step * 2));
+        // Each object has its own pace, and other topics none.
+        assert!(inner.throttle("drag/b", &msg(9), t0 + step));
+        assert!(inner.throttle("hover", &msg(9), t0 + step));
+        assert!(inner.throttle("hover", &msg(9), t0 + step));
+        inner.flush(t0 + step * 3);
+        assert!(inner.queues.is_empty());
+        // Once the interval is over, only the latest goes, and the pace counts from it.
+        inner.flush(t0 + STREAM_INTERVAL);
+        let queue = inner.queues.remove(&pid(2)).unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].1, msg(3));
+        let t1 = t0 + STREAM_INTERVAL;
+        assert!(!inner.throttle("drag/a", &msg(4), t1 + step));
+        assert!(inner.throttle("drag/a", &msg(5), t1 + STREAM_INTERVAL));
+        // A stream with nothing held is forgotten after its interval.
+        inner.flush(t1 + STREAM_INTERVAL * 3);
+        assert!(inner.throttles.is_empty());
+    }
+
+    #[test]
+    fn test_drop_discards_held_drag() {
+        let bus = open(&tmp());
+        bus.set_kind(pid(1), "view2d");
+        add(&bus, "a");
+        command(&bus, pid(1), grab("a"));
+        bus.subscribe(pid(2), "drag/a");
+        bus.subscribe(pid(2), Topic::SCENE);
+        bus.take_queued();
+        let sample = |x| json!({ "id": "a", "position": [x, 0, 0] });
+        bus.publish(pid(1), "drag/a", sample(1), false);
+        bus.publish(pid(1), "drag/a", sample(2), false);
+        let moved = Command::MoveObject {
+            id: "a".to_owned(),
+            position: [3.0, 0.0, 0.0],
+        };
+        command(&bus, pid(1), moved);
+        std::thread::sleep(STREAM_INTERVAL * 2);
+        let queued = bus.take_queued();
+        assert_eq!(topics(&queued), vec![(2, "drag/a"), (2, "scene")]);
+        assert_eq!(queued[0].2.value, sample(1));
     }
 
     #[test]

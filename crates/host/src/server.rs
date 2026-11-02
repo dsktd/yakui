@@ -3,6 +3,7 @@
 use std::net::Ipv4Addr;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::Path;
@@ -27,6 +28,7 @@ use pane_api::PaneId;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::broadcast::error::RecvError;
+use tokio::time::MissedTickBehavior;
 
 use crate::Result;
 use crate::host::Host;
@@ -182,6 +184,10 @@ async fn ws(
     ws.on_upgrade(move |socket| connection(socket, space, query))
 }
 
+/// How often a connection asks its space for the stream messages coming due: twice per
+/// stream interval, so a held drag waits at most half an interval more.
+const TICK: Duration = Duration::from_millis(8);
+
 /// Numbers the client connections, so a space knows which one drove a pane last.
 static CONNECTIONS: AtomicU64 = AtomicU64::new(1);
 
@@ -217,8 +223,15 @@ async fn serve_connection(
         query.pane,
         query.read_only()
     );
+    let mut tick = tokio::time::interval(TICK);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            _ = tick.tick() => {
+                if let Err(err) = space.tick() {
+                    warn!("space {}: {err}", query.space);
+                }
+            }
             frame = rx.recv() => {
                 let frame = match frame {
                     Ok(frame) => frame,
