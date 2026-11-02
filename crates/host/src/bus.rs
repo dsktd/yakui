@@ -72,6 +72,8 @@ pub trait Bus: BusStore {
     /// Everything queued, in arrival order per pane, after the held stream messages that are
     /// due.
     fn take_queued(&self) -> Vec<(PaneId, String, Message)>;
+    /// When the earliest held stream message comes due, if any is held.
+    fn next_due(&self) -> Option<Instant>;
     /// Record the kind of `pane`, whose prefix is the only private one it may write.
     fn set_kind(
         &self,
@@ -221,6 +223,9 @@ impl Bus for Local {
         kind: &str,
     ) {
         self.0.lock().unwrap().kinds.insert(pane, kind.to_owned());
+    }
+    fn next_due(&self) -> Option<Instant> {
+        self.0.lock().unwrap().next_due()
     }
     fn take_queued(&self) -> Vec<(PaneId, String, Message)> {
         let mut bus = self.0.lock().unwrap();
@@ -373,6 +378,13 @@ impl LocalInner {
                 true
             }
         }
+    }
+    fn next_due(&self) -> Option<Instant> {
+        self.throttles
+            .values()
+            .filter(|throttle| throttle.held.is_some())
+            .map(|throttle| throttle.sent + STREAM_INTERVAL)
+            .min()
     }
     /// Send every held stream message whose interval is over; forget idle streams.
     fn flush(
@@ -1249,6 +1261,7 @@ mod test {
         assert!(inner.throttle("drag/b", &msg(9), t0 + step));
         assert!(inner.throttle("hover", &msg(9), t0 + step));
         assert!(inner.throttle("hover", &msg(9), t0 + step));
+        assert_eq!(inner.next_due(), Some(t0 + STREAM_INTERVAL));
         inner.flush(t0 + step * 3);
         assert!(inner.queues.is_empty());
         // Once the interval is over, only the latest goes, and the pace counts from it.
@@ -1256,6 +1269,7 @@ mod test {
         let queue = inner.queues.remove(&pid(2)).unwrap();
         assert_eq!(queue.len(), 1);
         assert_eq!(queue[0].1, msg(3));
+        assert_eq!(inner.next_due(), None);
         let t1 = t0 + STREAM_INTERVAL;
         assert!(!inner.throttle("drag/a", &msg(4), t1 + step));
         assert!(inner.throttle("drag/a", &msg(5), t1 + STREAM_INTERVAL));
@@ -1281,7 +1295,11 @@ mod test {
             position: [3.0, 0.0, 0.0],
         };
         command(&bus, pid(1), moved);
-        std::thread::sleep(STREAM_INTERVAL * 2);
+        assert_eq!(bus.next_due(), None);
+        bus.0
+            .lock()
+            .unwrap()
+            .flush(Instant::now() + STREAM_INTERVAL * 2);
         let queued = bus.take_queued();
         assert_eq!(topics(&queued), vec![(2, "drag/a"), (2, "scene")]);
         assert_eq!(queued[0].2.value, sample(1));

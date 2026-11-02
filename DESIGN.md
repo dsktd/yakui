@@ -240,7 +240,7 @@ Built 2026-11-01, as PROTOCOL.md says, with these choices:
 
 - The scene schema is PROTOCOL.md's: `scene = { objects: [Object] }`,
   `Object = { id, name, kind, position: [x,y,z], size: [x,y,z], color:
-  "#rrggbb", props? }`; view2d shows the x/y plane (y up), view3d the same
+"#rrggbb", props? }`; view2d shows the x/y plane (y up), view3d the same
   scene with an orbit camera. Panes read it with the tolerant readers in
   `pane-api::protocol` (a bad object is skipped, a bad topic reads as empty).
 - Seeding: the host retains four objects (fixed ids) as `scene` when a
@@ -301,8 +301,8 @@ Cal's spec, hand-rolled (no ggrs, lightyear or naia):
 - **Stream, then commit.** While dragging, view2d publishes the object on
   the transient `drag/<id>` once per pointer move; the drop is still one
   `move_object`, so `scene` only ever holds final positions. The host paces
-  each `drag/<id>` to 60 Hz, holding back the latest (a tick from every
-  open connection flushes it) and discarding a held one once the object is
+  each `drag/<id>` to 60 Hz, holding back the latest (a connection wakes
+  when it comes due and flushes it; idle connections never wake) and discarding a held one once the object is
   dropped or let go, so no sample lands after the final position.
 - **Draw behind, snap forward.** Receivers draw a stream through
   `interpolate(topic)` in `web/protocol.js`: three samples, drawn one

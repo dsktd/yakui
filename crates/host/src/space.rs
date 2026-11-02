@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use anyhow::anyhow;
 use log::debug;
@@ -177,6 +178,10 @@ impl Space {
             let _ = space.tx.send(pane_frame(pane, event));
         }
         space.settle()
+    }
+    /// When [`Space::tick`] has a held stream message to deliver, if any is held.
+    pub fn next_due(&self) -> Option<Instant> {
+        self.0.lock().unwrap().bus.next_due()
     }
     /// Deliver what the bus held back (stream messages coming due) and fan out the result.
     pub fn tick(&self) -> Result<()> {
