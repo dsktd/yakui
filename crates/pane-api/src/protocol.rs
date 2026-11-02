@@ -1,6 +1,8 @@
 //! The shared vocabulary of PROTOCOL.md: topics, their message shapes, and the commands the
 //! host applies. Every pane uses these; none keeps its own copy.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Map;
@@ -16,21 +18,32 @@ impl Topic {
     pub const PROTOCOL: &'static str = "protocol";
     pub const SCENE: &'static str = "scene";
     pub const SELECTION: &'static str = "selection";
+    pub const OWNERS: &'static str = "owners";
     pub const HOVER: &'static str = "hover";
     pub const TOOL: &'static str = "tool";
     pub const FOCUS: &'static str = "focus";
     pub const CMD: &'static str = "cmd";
-    pub const RETAINED: [&'static str; 3] = [Self::PROTOCOL, Self::SCENE, Self::SELECTION];
+    pub const RETAINED: [&'static str; 4] =
+        [Self::PROTOCOL, Self::SCENE, Self::SELECTION, Self::OWNERS];
     pub const TRANSIENT: [&'static str; 4] = [Self::HOVER, Self::TOOL, Self::FOCUS, Self::CMD];
 
     /// Where the host answers `pane`'s invalid commands.
     pub fn rejected(pane: PaneId) -> String {
         format!("rejected/{pane}")
     }
+    /// Where the pane holding object `id` streams it while dragging.
+    pub fn drag(id: &str) -> String {
+        format!("drag/{id}")
+    }
+    /// The object a `drag/<id>` topic is about.
+    pub fn drag_id(topic: &str) -> Option<&str> {
+        topic.strip_prefix("drag/").filter(|id| !id.is_empty())
+    }
     pub fn is_standard(topic: &str) -> bool {
         Self::RETAINED.contains(&topic)
             || Self::TRANSIENT.contains(&topic)
             || topic.starts_with("rejected/")
+            || topic.starts_with("drag/")
     }
 }
 
@@ -125,6 +138,31 @@ impl Selection {
     }
 }
 
+/// The `owners` message: which pane holds which object, by `grab` until `release`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct Owners {
+    pub owners: BTreeMap<String, PaneId>,
+}
+impl Owners {
+    pub fn from_message(msg: &Value) -> Self {
+        serde_json::from_value(msg.clone()).unwrap_or_default()
+    }
+    pub fn holder(
+        &self,
+        id: &str,
+    ) -> Option<PaneId> {
+        self.owners.get(id).copied()
+    }
+}
+
+/// A `drag/<id>` message: where the holder has object `id` now, between `grab` and the
+/// `move_object` that drops it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Drag {
+    pub id: String,
+    pub position: [f64; 3],
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct Hover {
     pub id: Option<String>,
@@ -170,6 +208,13 @@ pub enum Command {
     MoveObject {
         id: String,
         position: [f64; 3],
+    },
+    /// Hold `id` for a drag: only the holder may stream `drag/<id>` or move it.
+    Grab {
+        id: String,
+    },
+    Release {
+        id: String,
     },
 }
 
@@ -246,6 +291,18 @@ mod test {
         assert!(Topic::is_standard(&Topic::rejected(pane)));
         assert!(Topic::is_standard("scene"));
         assert!(!Topic::is_standard("view3d/camera"));
+        assert!(Topic::is_standard(&Topic::drag("a")));
+        assert_eq!(Topic::drag_id("drag/a"), Some("a"));
+        assert_eq!(Topic::drag_id("drag/"), None);
+        assert_eq!(Topic::drag_id("view2d/a"), None);
+        let owners = Owners::from_message(&json!({ "owners": { "a": pane } }));
+        assert_eq!(owners.holder("a"), Some(pane));
+        assert_eq!(owners.holder("b"), None);
+        assert!(
+            Owners::from_message(&json!({ "owners": { "a": 3 } }))
+                .owners
+                .is_empty()
+        );
         assert!(Selection::from_message(&json!(["a"])).ids.is_empty());
         assert_eq!(Hover::from_message(&json!({ "id": null })).id, None);
         assert!(Protocol::from_message(&json!({ "version": 1 })).supported());

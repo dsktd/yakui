@@ -1,6 +1,8 @@
 //! HTTP routes, the WebSocket, and the static web shell.
 
 use std::net::Ipv4Addr;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use axum::Router;
 use axum::extract::Path;
@@ -180,10 +182,26 @@ async fn ws(
     ws.on_upgrade(move |socket| connection(socket, space, query))
 }
 
+/// Numbers the client connections, so a space knows which one drove a pane last.
+static CONNECTIONS: AtomicU64 = AtomicU64::new(1);
+
 async fn connection(
     socket: WebSocket,
     space: Space,
     query: WsQuery,
+) {
+    let conn = CONNECTIONS.fetch_add(1, Ordering::Relaxed);
+    serve_connection(socket, &space, &query, conn).await;
+    if let Err(err) = space.disconnect(conn) {
+        warn!("space {}: {err}", query.space);
+    }
+}
+
+async fn serve_connection(
+    socket: WebSocket,
+    space: &Space,
+    query: &WsQuery,
+    conn: u64,
 ) {
     let (mut sink, mut stream) = socket.split();
     // Subscribe before snapshotting so nothing between the two is missed.
@@ -237,7 +255,7 @@ async fn connection(
                 }
                 match incoming {
                     Incoming::Pane { pane_id, payload } => {
-                        if let Err(err) = space.update(pane_id, payload) {
+                        if let Err(err) = space.update(conn, pane_id, payload) {
                             warn!("pane {pane_id}: {err}");
                         }
                     }

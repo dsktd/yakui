@@ -33,11 +33,13 @@ Standard topics:
 | `protocol`        | retained  | `{ "version": 1 }`                     | host                       |
 | `scene`           | retained  | `{ "objects": [Object] }`              | host only (via commands)   |
 | `selection`       | retained  | `{ "ids": [string] }`                  | host only (via commands)   |
+| `owners`          | retained  | `{ "owners": { [id]: pane } }`         | host only (via commands)   |
 | `hover`           | transient | `{ "id": string \| null }`             | any pane                   |
 | `tool`            | transient | `{ "name": string }`                   | any pane                   |
 | `focus`           | transient | `{ "id": string }` ("look at this")    | any pane                   |
 | `cmd`             | transient | `Command` (below)                      | any pane; consumed by host |
 | `rejected/<pane>` | transient | `{ "cmd": Command, "reason": string }` | host, to the sending pane  |
+| `drag/<id>`       | transient | `{ "id", "position": [x,y,z] }`        | the pane holding `id` only |
 
 `Object = { id, name, kind: "box"|"sphere"|"light"|..., position: [x,y,z],
 size: [x,y,z], color: "#rrggbb", props?: { [key]: JSON } }`. An unknown
@@ -51,6 +53,15 @@ topics and its own prefix; any other write (another pane's prefix, a standard re
 topic, an empty or malformed name) is dropped, and the host answers `rejected/<pane>` with
 `{ "topic", "reason" }`. A retained value over 256 KiB as JSON is refused the same way
 (a command that would make `scene` or `selection` that big is rejected).
+
+`owners` maps an object id to the pane that holds it (by `grab`, below); it
+starts empty whenever the host starts, so nothing stays held across a
+restart. `drag/<id>` streams a held object's transform while it is dragged,
+at most one message per frame; the host drops (silently, it is a stream) a
+`drag/<id>` from any pane but the holder. The drop itself is a
+`move_object`, so the retained `scene` has the final position; a receiver
+draws the stream between its own `scene` updates (`interpolate` in
+`protocol.js`) and snaps to `scene` when it changes.
 
 Rules: subscribe by name, never by sender. Tolerate a missing or malformed
 message (ignore it, never panic, never "repair" a topic you do not own).
@@ -71,7 +82,9 @@ on drop, not per pointer move).
 | `add_object`     | `object: Object` (`id` optional) | append; host assigns `id` when missing                                |
 | `remove_objects` | `ids: [string]`                  | remove; also drop them from `selection`                               |
 | `set_property`   | `ids: [string], key, value`      | known key on each object, else `props[key]`; typed check, all or none |
-| `move_object`    | `id, position: [x,y,z]`          | `position = position`                                                 |
+| `move_object`    | `id, position: [x,y,z]`          | `position = position` (refused if another pane holds `id`)            |
+| `grab`           | `id`                             | `owners[id] = sender`; refused if another pane holds it               |
+| `release`        | `id`                             | drop `owners[id]` (refused if another pane holds it; free is a no-op) |
 
 `#[serde(tag = "cmd")]` in Rust; `{ "cmd": "select", "ids": [...] }` on the
 wire. A rejected command changes nothing. `set_property` refuses `id` and
@@ -79,6 +92,13 @@ wire. A rejected command changes nothing. `set_property` refuses `id` and
 time). A message on `cmd` that is not a command at all is logged and
 dropped: `rejected/<pane>` carries the typed command, so there is nothing to
 echo.
+
+`grab` and `release` bracket a drag. Grabs are decided in arrival order:
+the first wins, a later one is rejected on `rejected/<pane>` like any other
+command (`cmd` is the `grab`, `reason` names the holder), and the loser
+drops its local drag and follows the holder's `drag/<id>`. A holder lets go
+by `release`, or when its pane is removed, or when the client connection
+that last drove the pane closes.
 
 ## 3. Widget events
 

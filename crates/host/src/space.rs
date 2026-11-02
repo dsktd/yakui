@@ -90,6 +90,8 @@ pub struct SpaceInner {
     host: HostId,
     dir: PathBuf,
     tx: broadcast::Sender<Frame>,
+    /// The client connection that last sent each pane a message.
+    drivers: HashMap<PaneId, u64>,
 }
 
 impl Space {
@@ -131,6 +133,7 @@ impl Space {
             host,
             dir,
             tx,
+            drivers: HashMap::new(),
         };
         inner.settle()?;
         Ok(Self(Arc::new(Mutex::new(inner))))
@@ -156,19 +159,41 @@ impl Space {
         }
         frames
     }
-    /// Route a client message to its pane and fan out what the pane emits.
+    /// Route a message from client connection `conn` to its pane and fan out what the pane
+    /// emits.
     pub fn update(
         &self,
+        conn: u64,
         pane: PaneId,
         msg: Value,
     ) -> Result<()> {
         let mut space = self.0.lock().unwrap();
+        space.drivers.insert(pane, conn);
         let p = space
             .panes
             .get_mut(&pane)
             .ok_or(anyhow!("No pane {pane}"))?;
         for event in p.update(msg)? {
             let _ = space.tx.send(pane_frame(pane, event));
+        }
+        space.settle()
+    }
+    /// Client connection `conn` is gone: every pane it was the last to drive lets go of what
+    /// it holds, so a dropped client cannot keep an object grabbed.
+    pub fn disconnect(
+        &self,
+        conn: u64,
+    ) -> Result<()> {
+        let mut space = self.0.lock().unwrap();
+        let panes: Vec<PaneId> = space
+            .drivers
+            .iter()
+            .filter(|(_pane, driver)| **driver == conn)
+            .map(|(pane, _driver)| *pane)
+            .collect();
+        for pane in panes {
+            space.drivers.remove(&pane);
+            space.bus.release(pane);
         }
         space.settle()
     }
@@ -325,6 +350,10 @@ fn pane_frame(
 
 #[cfg(test)]
 mod test {
+    use pane_api::protocol::Command;
+    use pane_api::protocol::Owners;
+    use pane_api::protocol::Topic;
+
     use super::*;
 
     #[test]
@@ -385,6 +414,40 @@ mod test {
         assert!(inner.panes.contains_key(&three));
         assert_eq!(inner.layout.panes[&three].kind, "inspector");
         drop(inner);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_disconnect_releases() {
+        let dir = std::env::temp_dir().join(format!("yakui-space-{:08x}", rand::random::<u32>()));
+        let host = HostId(0xabc);
+        let mut registry = Registry::default();
+        registry.add::<pane_clock::Clock>();
+        registry.add::<pane_notes::Notes>();
+        let space = Space::open(&dir, registry, host).unwrap();
+        let one = PaneId::new(host, 1);
+        let two = PaneId::new(host, 2);
+        let holder = |id| {
+            let bus = space.0.lock().unwrap().bus.clone();
+            Owners::from_message(&bus.retained(Topic::OWNERS).unwrap().value).holder(id)
+        };
+        {
+            let mut inner = space.0.lock().unwrap();
+            for (pane, id) in [(one, "seed-box"), (two, "seed-ball")] {
+                let grab = Command::Grab { id: id.to_owned() };
+                inner
+                    .bus
+                    .publish(pane, Topic::CMD, serde_json::to_value(grab).unwrap(), false);
+            }
+            // Connection 7 drove pane 1 last, connection 8 pane 2.
+            inner.drivers.insert(one, 7);
+            inner.drivers.insert(two, 8);
+        }
+        space.disconnect(9).unwrap();
+        assert_eq!(holder("seed-box"), Some(one));
+        space.disconnect(7).unwrap();
+        assert_eq!(holder("seed-box"), None);
+        assert_eq!(holder("seed-ball"), Some(two));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

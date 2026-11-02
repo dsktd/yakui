@@ -20,6 +20,7 @@ use pane_api::Message;
 use pane_api::PaneId;
 use pane_api::protocol::Command;
 use pane_api::protocol::Object;
+use pane_api::protocol::Owners;
 use pane_api::protocol::Rejected;
 use pane_api::protocol::Scene;
 use pane_api::protocol::Selection;
@@ -45,6 +46,11 @@ pub trait Bus: BusStore {
     ) -> Option<Message>;
     /// Drop every subscription and queued message of `pane`, when the pane goes.
     fn unsubscribe(
+        &self,
+        pane: PaneId,
+    );
+    /// Let go of every object `pane` holds, when the client driving it goes.
+    fn release(
         &self,
         pane: PaneId,
     );
@@ -124,6 +130,8 @@ impl Local {
             dirty: false,
         };
         inner.publish(None, Topic::PROTOCOL, json!({ "version": VERSION }), true);
+        // No pane holds anything across a restart.
+        inner.publish(None, Topic::OWNERS, json!({ "owners": {} }), true);
         info!(
             "{} retained topics from {}",
             inner.retained.len(),
@@ -159,6 +167,13 @@ impl Bus for Local {
         }
         bus.queues.remove(&pane);
         bus.kinds.remove(&pane);
+        bus.release(pane);
+    }
+    fn release(
+        &self,
+        pane: PaneId,
+    ) {
+        self.0.lock().unwrap().release(pane);
     }
     fn hold(
         &self,
@@ -262,6 +277,13 @@ impl BusStore for Local {
             bus.refuse(pane, topic, &err);
             return;
         }
+        // A drag from anyone but the holder is noise from a lost race, not worth an answer.
+        if let Some(id) = Topic::drag_id(topic)
+            && bus.owners().holder(id) != Some(pane)
+        {
+            debug!("pane {pane} does not hold {id}, dropped {topic}");
+            return;
+        }
         bus.publish(Some(pane), topic, value, retain);
     }
 }
@@ -344,7 +366,7 @@ impl LocalInner {
                 return;
             }
         };
-        let Err(err) = self.apply(&cmd) else {
+        let Err(err) = self.apply(pane, &cmd) else {
             return;
         };
         warn!("pane {pane} {cmd:?}: {err}");
@@ -370,6 +392,27 @@ impl LocalInner {
     ) -> Result<()> {
         self.retain_checked(Topic::SCENE, serde_json::to_value(scene).unwrap())
     }
+    fn owners(&self) -> Owners {
+        match self.retained.get(Topic::OWNERS) {
+            Some(msg) => Owners::from_message(&msg.value),
+            None => Owners::default(),
+        }
+    }
+    fn retain_owners(
+        &mut self,
+        owners: &Owners,
+    ) -> Result<()> {
+        self.retain_checked(Topic::OWNERS, serde_json::to_value(owners).unwrap())
+    }
+    /// Drop every object `pane` holds.
+    fn release(
+        &mut self,
+        pane: PaneId,
+    ) {
+        let mut owners = self.owners();
+        owners.owners.retain(|_id, holder| *holder != pane);
+        let _ = self.retain_owners(&owners);
+    }
     fn retain_selection(
         &mut self,
         selection: &Selection,
@@ -390,6 +433,7 @@ impl LocalInner {
     /// changes nothing.
     fn apply(
         &mut self,
+        pane: PaneId,
         cmd: &Command,
     ) -> Result<()> {
         match cmd {
@@ -431,8 +475,11 @@ impl LocalInner {
                     None => Selection::default(),
                 };
                 selection.ids.retain(|id| !ids.contains(id));
+                let mut owners = self.owners();
+                owners.owners.retain(|id, _holder| !ids.contains(id));
                 self.retain_scene(&scene)?;
                 self.retain_selection(&selection)?;
+                self.retain_owners(&owners)?;
             }
             Command::SetProperty { ids, key, value } => {
                 if ids.is_empty() {
@@ -450,6 +497,7 @@ impl LocalInner {
                 self.retain_scene(&scene)?;
             }
             Command::MoveObject { id, position } => {
+                self.check_holder(pane, id)?;
                 let mut scene = self.scene()?;
                 let object = scene
                     .objects
@@ -460,19 +508,45 @@ impl LocalInner {
                 object.position = *position;
                 self.retain_scene(&scene)?;
             }
+            Command::Grab { id } => {
+                if self.scene()?.object(id).is_none() {
+                    return Err(anyhow!("No object {id}"));
+                }
+                self.check_holder(pane, id)?;
+                let mut owners = self.owners();
+                owners.owners.insert(id.clone(), pane);
+                self.retain_owners(&owners)?;
+            }
+            Command::Release { id } => {
+                self.check_holder(pane, id)?;
+                let mut owners = self.owners();
+                owners.owners.remove(id);
+                self.retain_owners(&owners)?;
+            }
         }
         Ok(())
+    }
+    /// Whether `pane` may touch `id`: nobody holds it, or `pane` does.
+    fn check_holder(
+        &self,
+        pane: PaneId,
+        id: &str,
+    ) -> Result<()> {
+        match self.owners().holder(id) {
+            Some(holder) if holder != pane => Err(anyhow!("Object {id} is held by {holder}")),
+            _ => Ok(()),
+        }
     }
 }
 
 /// What a pane of `kind` may publish, or retain if `retain`: the standard transient topics
-/// (not retained) and `<kind>/<name>`.
+/// and `drag/<id>` (not retained), and `<kind>/<name>`.
 fn check_topic(
     kind: Option<&str>,
     topic: &str,
     retain: bool,
 ) -> Result<()> {
-    if Topic::TRANSIENT.contains(&topic) {
+    if Topic::TRANSIENT.contains(&topic) || Topic::drag_id(topic).is_some() {
         if retain {
             return Err(anyhow!("{topic} is transient, it cannot be retained"));
         }
@@ -969,6 +1043,121 @@ mod test {
             bus.retained(Topic::SELECTION).unwrap().value,
             json!({ "ids": [] })
         );
+    }
+
+    fn grab(id: &str) -> Command {
+        Command::Grab { id: id.to_owned() }
+    }
+
+    fn release(id: &str) -> Command {
+        Command::Release { id: id.to_owned() }
+    }
+
+    fn holder(
+        bus: &Local,
+        id: &str,
+    ) -> Option<PaneId> {
+        Owners::from_message(&bus.retained(Topic::OWNERS).unwrap().value).holder(id)
+    }
+
+    #[test]
+    fn test_grab_in_arrival_order() {
+        let bus = open(&tmp());
+        add(&bus, "a");
+        bus.subscribe(pid(1), &Topic::rejected(pid(1)));
+        bus.subscribe(pid(2), &Topic::rejected(pid(2)));
+        bus.take_queued();
+        // The first grab wins; the second is denied on the loser's rejected topic.
+        command(&bus, pid(1), grab("a"));
+        command(&bus, pid(2), grab("a"));
+        assert_eq!(holder(&bus, "a"), Some(pid(1)));
+        let queued = bus.take_queued();
+        assert_eq!(
+            topics(&queued),
+            vec![(2, "rejected/00000000000000000000000000000abc-2")]
+        );
+        let denied: Rejected = serde_json::from_value(queued[0].2.value.clone()).unwrap();
+        assert_eq!(denied.cmd, grab("a"));
+        assert!(denied.reason.contains("held by"));
+        // Grabbing again is fine for the holder; nobody else moves or releases it.
+        command(&bus, pid(1), grab("a"));
+        let moved = Command::MoveObject {
+            id: "a".to_owned(),
+            position: [5.0, 0.0, 0.0],
+        };
+        command(&bus, pid(2), moved.clone());
+        command(&bus, pid(2), release("a"));
+        assert_eq!(topics(&bus.take_queued()).len(), 2);
+        assert_eq!(holder(&bus, "a"), Some(pid(1)));
+        let scene = Scene::from_message(&bus.retained(Topic::SCENE).unwrap().value);
+        assert_eq!(scene.object("a").unwrap().position, [0.0; 3]);
+        // The holder moves and lets go; then the other pane may grab it.
+        command(&bus, pid(1), moved);
+        command(&bus, pid(1), release("a"));
+        assert_eq!(holder(&bus, "a"), None);
+        command(&bus, pid(2), grab("a"));
+        assert_eq!(holder(&bus, "a"), Some(pid(2)));
+        assert!(bus.take_queued().is_empty());
+        // An unknown object cannot be grabbed; a removed one is let go.
+        command(&bus, pid(1), grab("zz"));
+        assert_eq!(topics(&bus.take_queued()).len(), 1);
+        let remove = Command::RemoveObjects {
+            ids: vec!["a".to_owned()],
+        };
+        command(&bus, pid(1), remove);
+        assert_eq!(holder(&bus, "a"), None);
+    }
+
+    #[test]
+    fn test_drag_only_from_holder() {
+        let bus = open(&tmp());
+        bus.set_kind(pid(1), "view2d");
+        bus.set_kind(pid(2), "view2d");
+        add(&bus, "a");
+        let topic = Topic::drag("a");
+        bus.subscribe(pid(3), &topic);
+        bus.subscribe(pid(2), &Topic::rejected(pid(2)));
+        let sample = json!({ "id": "a", "position": [1, 2, 0] });
+        // Nobody holds it, then pane 1 does: only pane 1's drags go through, silently.
+        bus.publish(pid(1), &topic, sample.clone(), false);
+        command(&bus, pid(1), grab("a"));
+        bus.take_queued();
+        bus.publish(pid(2), &topic, sample.clone(), false);
+        bus.publish(pid(1), &topic, sample.clone(), false);
+        let queued = bus.take_queued();
+        assert_eq!(topics(&queued), vec![(3, "drag/a")]);
+        assert!(queued[0].2.ts.is_some());
+        // A drag topic is never retained.
+        bus.publish(pid(1), &topic, sample, true);
+        assert_eq!(bus.retained(&topic), None);
+    }
+
+    #[test]
+    fn test_release_when_pane_goes() {
+        let bus = open(&tmp());
+        add(&bus, "a");
+        add(&bus, "b");
+        command(&bus, pid(1), grab("a"));
+        command(&bus, pid(1), grab("b"));
+        command(&bus, pid(2), grab("b"));
+        bus.release(pid(2));
+        assert_eq!(holder(&bus, "b"), Some(pid(1)));
+        bus.release(pid(1));
+        assert_eq!(holder(&bus, "a"), None);
+        assert_eq!(holder(&bus, "b"), None);
+        command(&bus, pid(1), grab("a"));
+        bus.unsubscribe(pid(1));
+        assert_eq!(holder(&bus, "a"), None);
+    }
+
+    #[test]
+    fn test_owners_reset_on_open() {
+        let path = tmp();
+        let bus = open(&path);
+        add(&bus, "a");
+        command(&bus, pid(1), grab("a"));
+        bus.save().unwrap();
+        assert_eq!(holder(&open(&path), "a"), None);
     }
 
     #[test]
