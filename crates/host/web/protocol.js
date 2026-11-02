@@ -1,6 +1,6 @@
 // The client side of PROTOCOL.md: the names a pane's web half and the widgets share.
 // Topics and commands are the Rust half's business; a web half only needs the widget
-// event names and the shapes its own Rust half hands it.
+// event names, the shapes its own Rust half hands it, and how to draw a stream of them.
 
 // What a widget may emit. The pane decides what, if anything, to do with it.
 export const Emits = Object.freeze({
@@ -16,4 +16,56 @@ export const Kind = Object.freeze({ BOX: 'box', SPHERE: 'sphere', LIGHT: 'light'
 
 export function isColor(value) {
   return typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value);
+}
+
+// How far past its newest sample a stream is carried on when samples stop, in ms.
+export const EXTRAPOLATE = 100;
+// Samples kept per stream, and the most a stream is drawn behind its newest one, in ms.
+const SAMPLES = 3;
+const MAX_DELAY = 100;
+
+const isVec =(v) => Array.isArray(v) && v.length === 3 && v.every(Number.isFinite);
+export const lerp = (a, b, k) => a.map((x, i) => x + (b[i] - x) * k);
+
+// One remote object's position from a transient stream (`topic`, e.g. `drag/<id>`), drawn
+// smoothly: `push` each sample with its sender's `ts` (monotonic ms) as it arrives; `at`
+// gives the position to draw now, one sample interval behind the newest, so there is
+// always a pair to lerp between, and carried on along the last velocity for at most
+// EXTRAPOLATE ms when samples stop. `snap` forgets the stream when the retained value
+// arrives; `at` is then null and the caller draws the retained value. `now` is the
+// receiver's monotonic ms; the two clocks are tied by the smallest delay seen.
+export function interpolate(topic) {
+  let samples = [];
+  let offset = Infinity;
+  return {
+    topic,
+    push(position, ts, now = performance.now()) {
+      if (!isVec(position) || !Number.isFinite(ts)) return;
+      if (samples.length && ts <= samples.at(-1).ts) return; // late or repeated
+      offset = Math.min(offset, now - ts);
+      samples.push({ position, ts });
+      if (samples.length > SAMPLES) samples.shift();
+    },
+    at(now = performance.now()) {
+      if (!samples.length) return null;
+      const last = samples.at(-1);
+      if (samples.length === 1) return last.position;
+      const prev = samples.at(-2);
+      const t = now - offset - Math.min(last.ts - prev.ts, MAX_DELAY);
+      if (t <= samples[0].ts) return samples[0].position;
+      for (let i = 1; i < samples.length; i++) {
+        const [a, b] = [samples[i - 1], samples[i]];
+        if (t <= b.ts) return lerp(a.position, b.position, (t - a.ts) / (b.ts - a.ts));
+      }
+      const ahead = Math.min(t - last.ts, EXTRAPOLATE);
+      return lerp(prev.position, last.position, 1 + ahead / (last.ts - prev.ts));
+    },
+    snap() {
+      samples = [];
+      offset = Infinity;
+    },
+    get live() {
+      return samples.length > 0;
+    },
+  };
 }
