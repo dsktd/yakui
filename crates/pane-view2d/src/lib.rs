@@ -4,6 +4,7 @@
 use log::warn;
 use pane_api::Bus;
 use pane_api::Ctx;
+use pane_api::HostId;
 use pane_api::Message;
 use pane_api::Out;
 use pane_api::Pane;
@@ -71,12 +72,14 @@ pub enum Event {
     Owners {
         owners: Owners,
     },
-    /// The holder of `id` has it at `position`; `ts` is the bus's, for `interpolate`.
+    /// The holder of `id` has it at `position`; `ts` is the bus's on host `origin`, for
+    /// `interpolate`.
     Drag {
         topic: String,
         id: String,
         position: [f64; 3],
         ts: u64,
+        origin: HostId,
     },
     /// This pane's grab of `id` lost to another pane's.
     Denied {
@@ -249,6 +252,7 @@ impl Pane for View2d {
                     id: id.to_owned(),
                     position: drag.position,
                     ts: msg.ts.unwrap_or(0),
+                    origin: msg.origin,
                 });
             }
         }
@@ -268,7 +272,6 @@ mod test {
     use std::sync::Arc;
 
     use pane_api::BusStore;
-    use pane_api::HostId;
     use pane_api::PaneId;
     use serde_json::Value;
     use serde_json::json;
@@ -325,7 +328,7 @@ mod test {
         assert_eq!(
             events,
             json!([{ "Drag": { "topic": "drag/a", "id": "a", "position": [1.0, 2.0, 3.0],
-                               "ts": 42 } }])
+                               "ts": 42, "origin": "00000000000000000000000000000001" } }])
         );
         assert_eq!(hear("drag/a", json!({ "id": "a" })), json!([]));
         let denied = json!({ "cmd": { "cmd": "grab", "id": "a" }, "reason": "held" });

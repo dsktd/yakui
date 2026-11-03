@@ -54,9 +54,9 @@ topic, an empty or malformed name) is dropped, and the host answers `rejected/<p
 `{ "topic", "reason" }`. A retained value over 256 KiB as JSON is refused the same way
 (a command that would make `scene` or `selection` that big is rejected).
 
-`owners` maps an object id to the pane that holds it (by `grab`, below); it
-starts empty whenever the host starts, so nothing stays held across a
-restart. `drag/<id>` streams a held object's transform while it is dragged,
+`owners` maps an object id to the pane that holds it (by `grab`, below);
+when a host starts it drops whatever its own panes held, so nothing stays
+held across a restart (other hosts' grabs in a shared space stay). `drag/<id>` streams a held object's transform while it is dragged,
 at most one message per frame; the host drops (silently, it is a stream) a
 `drag/<id>` from any pane but the holder, and paces each `drag/<id>` to at
 most 60 messages a second, holding back the latest one (with its original
@@ -95,12 +95,15 @@ time). A message on `cmd` that is not a command at all is logged and
 dropped: `rejected/<pane>` carries the typed command, so there is nothing to
 echo.
 
-`grab` and `release` bracket a drag. Grabs are decided in arrival order:
-the first wins, a later one is rejected on `rejected/<pane>` like any other
-command (`cmd` is the `grab`, `reason` names the holder), and the loser
-drops its local drag and follows the holder's `drag/<id>`. A holder lets go
-by `release`, or when its pane is removed, or when the client connection
-that last drove the pane closes.
+`grab` and `release` bracket a drag. Grabs are decided in arrival order by
+one host, the space's authority: the first wins, a later one is rejected on `rejected/<pane>` like
+any other command (`cmd` is the `grab`, `reason` names the holder), and the
+loser drops its local drag and follows the holder's `drag/<id>`. A holder
+lets go by `release`, or when its pane is removed, or when the client
+connection that last drove the pane closes. In a space shared by several
+hosts the authority is the lowest host id among a host and its neighbours;
+other hosts forward `grab` and `release` to it (DESIGN.md, "Grab authority
+across hosts").
 
 ## 3. Widget events
 

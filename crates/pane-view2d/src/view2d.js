@@ -273,10 +273,13 @@ export function mount(root, { send, onEvent }) {
       }
     } else if (e.Owners) setOwners(e.Owners.owners?.owners);
     else if (e.Drag) {
-      const { topic, id, position, ts } = e.Drag;
+      const { topic, id, position, ts, origin } = e.Drag;
       if (mine.has(id) || !(id in owners)) return;
       if (!streams.has(id)) streams.set(id, interpolate(topic));
-      streams.get(id).push(vec(position), ts);
+      const stream = streams.get(id);
+      // A holder on another host: its stream starts afresh, eased from where it was drawn.
+      if (stream.live && stream.origin !== origin) easeFromShown(id);
+      stream.push(vec(position), ts, performance.now(), origin);
     } else if (e.Denied) {
       const { id, reason } = e.Denied;
       mine.delete(id);

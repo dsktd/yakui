@@ -38,14 +38,22 @@ export const lerp = (a, b, k) => a.map((x, i) => x + (b[i] - x) * k);
 // always a pair to lerp between, and carried on along the last velocity for at most
 // EXTRAPOLATE ms when samples stop. `snap` forgets the stream when the retained value
 // arrives; `at` is then null and the caller draws the retained value. `now` is the
-// receiver's monotonic ms; the two clocks are tied by the smallest delay seen.
+// receiver's monotonic ms; the two clocks are tied by the smallest delay seen. `ts` counts
+// only within one sender's host, so a sample from another `origin` (the object passed to a
+// pane there) starts the stream afresh; without `origin` the last one is kept.
 export function interpolate(topic) {
   let samples = [];
   let offset = Infinity;
+  let source;
   return {
     topic,
-    push(position, ts, now = performance.now()) {
+    push(position, ts, now = performance.now(), origin = source) {
       if (!isVec(position) || !Number.isFinite(ts)) return;
+      if (origin !== source) {
+        samples = [];
+        offset = Infinity;
+        source = origin;
+      }
       if (samples.length && ts <= samples.at(-1).ts) return; // late or repeated
       offset = Math.min(offset, now - ts);
       samples.push({ position, ts });
@@ -71,6 +79,9 @@ export function interpolate(topic) {
     },
     get live() {
       return samples.length > 0;
+    },
+    get origin() {
+      return source;
     },
   };
 }

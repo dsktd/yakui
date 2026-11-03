@@ -41,6 +41,9 @@ const QUEUE: usize = 256;
 /// The most a retained value may take as JSON, so a pane cannot fill bus.json.
 const MAX_RETAINED: usize = 256 * 1024;
 
+/// Another host's `grab` or `release` for the authority: `{ pane, cmd }`.
+pub const REQUEST: &str = "host/request";
+
 /// The least time between two messages on one `drag/<id>`: 60 a second.
 pub const STREAM_INTERVAL: Duration = Duration::from_micros(16_667);
 
@@ -109,6 +112,9 @@ struct LocalInner {
     dirty: bool,
     /// Where this host's own messages go to reach other hosts, once [`Local::tap`] asked.
     tap: Option<UnboundedSender<(String, Message)>>,
+    /// The other hosts sharing the space now; the lowest id of these and this one decides
+    /// grabs.
+    peers: BTreeSet<HostId>,
 }
 
 impl Local {
@@ -132,6 +138,24 @@ impl Local {
                 Err(err) => warn!("{}: dropped {topic}: {err}", path.display()),
             }
         }
+        info!("{} retained topics from {}", retained.len(), path.display());
+        Ok(Self::with(path, origin, retained))
+    }
+    /// A bus that starts with nothing retained, whatever `path` holds, for a host joining a
+    /// shared space: its old copy would otherwise win over the shared one wherever its seq is
+    /// higher. The shared copy comes from the other hosts, and the next save replaces `path`.
+    pub fn fresh(
+        path: impl Into<PathBuf>,
+        origin: HostId,
+    ) -> Self {
+        Self::with(path.into(), origin, BTreeMap::new())
+    }
+    /// A bus holding `retained`, with `protocol` retained and this host's grabs dropped.
+    fn with(
+        path: PathBuf,
+        origin: HostId,
+        retained: BTreeMap<String, Message>,
+    ) -> Self {
         let mut inner = LocalInner {
             origin,
             epoch: Instant::now(),
@@ -143,16 +167,18 @@ impl Local {
             path,
             dirty: false,
             tap: None,
+            peers: BTreeSet::new(),
         };
         inner.publish(None, Topic::PROTOCOL, json!({ "version": VERSION }), true);
-        // No pane holds anything across a restart.
-        inner.publish(None, Topic::OWNERS, json!({ "owners": {} }), true);
-        info!(
-            "{} retained topics from {}",
-            inner.retained.len(),
-            inner.path.display()
-        );
-        Ok(Self(Arc::new(Mutex::new(inner))))
+        // No pane of this host holds anything across a restart. Other hosts' grabs stay: when
+        // the bus is shared, a newer copy without them would drop them everywhere. With no
+        // `owners` yet there is nothing to drop, and only the authority starts one.
+        if inner.retained.contains_key(Topic::OWNERS) {
+            let mut owners = inner.owners();
+            owners.owners.retain(|_id, holder| holder.host != origin);
+            let _ = inner.retain_owners(&owners);
+        }
+        Self(Arc::new(Mutex::new(inner)))
     }
     /// Retain [`seed_scene`] if the bus has no `scene`, so a fresh space shows something
     /// before its first subscriber gets its retained message.
@@ -163,22 +189,59 @@ impl Local {
         }
         let _ = bus.retain_scene(&seed_scene());
     }
-    /// Every message this host publishes from now on, to carry to other hosts. Messages
-    /// put in with [`Local::deliver`] are not repeated here.
+    pub fn origin(&self) -> HostId {
+        self.0.lock().unwrap().origin
+    }
+    /// The host that decides grabs: the lowest id of this host and its peers.
+    pub fn authority(&self) -> HostId {
+        self.0.lock().unwrap().authority()
+    }
+    /// Another host shares the space now.
+    pub fn peer_up(
+        &self,
+        host: HostId,
+    ) {
+        self.0.lock().unwrap().peers.insert(host);
+    }
+    /// A host left the space. If that makes this host the authority, its panes' grabs go.
+    pub fn peer_down(
+        &self,
+        host: HostId,
+    ) {
+        let mut bus = self.0.lock().unwrap();
+        bus.peers.remove(&host);
+        if bus.authority() == bus.origin {
+            let mut owners = bus.owners();
+            owners.owners.retain(|_id, holder| holder.host != host);
+            let _ = bus.retain_owners(&owners);
+        }
+    }
+    /// Every message this host publishes from now on, to carry to other hosts, but for
+    /// `rejected/<pane>`. Messages put in with [`Local::deliver`] are not repeated here.
     pub fn tap(&self) -> UnboundedReceiver<(String, Message)> {
         let (tx, rx) = unbounded_channel();
         self.0.lock().unwrap().tap = Some(tx);
         rx
     }
     /// A message from another host: queue it for subscribers, and keep it if it is
-    /// retained and newer by `(seq, origin)` than the copy here. Returns whether it was
-    /// kept or delivered.
+    /// retained and newer by `(seq, origin)` than the copy here. A request is applied if
+    /// this host is the authority; a drag is dropped unless a pane of its host holds the
+    /// object. Returns whether it was kept, applied or delivered.
     pub fn deliver(
         &self,
         topic: &str,
         msg: Message,
     ) -> bool {
         let mut bus = self.0.lock().unwrap();
+        if topic == REQUEST {
+            return bus.answer(msg);
+        }
+        if let Some(id) = Topic::drag_id(topic)
+            && bus.owners().holder(id).map(|holder| holder.host) != Some(msg.origin)
+        {
+            debug!("host {} does not hold {id}, dropped {topic}", msg.origin);
+            return false;
+        }
         if let Some(seq) = msg.seq {
             let newer = match bus.retained.get(topic) {
                 Some(last) => (seq, msg.origin) > (last.seq.unwrap_or(0), last.origin),
@@ -189,6 +252,9 @@ impl Local {
             }
             bus.retained.insert(topic.to_owned(), msg.clone());
             bus.dirty = true;
+            if topic == Topic::SCENE && bus.authority() == bus.origin {
+                bus.prune_owners();
+            }
         }
         let panes = match bus.subscribers.get(topic) {
             Some(panes) => panes.iter().copied().collect::<Vec<_>>(),
@@ -457,7 +523,15 @@ impl LocalInner {
         topic: &str,
         msg: Message,
     ) {
-        if let Some(tap) = &self.tap {
+        // A rejection of a pane here is nothing other hosts need; one of another host's
+        // pane answers its request.
+        let here = topic
+            .strip_prefix("rejected/")
+            .and_then(|pane| pane.parse::<PaneId>().ok())
+            .is_some_and(|pane| pane.host == self.origin);
+        if let Some(tap) = &self.tap
+            && !here
+        {
             let _ = tap.send((topic.to_owned(), msg.clone()));
         }
         let panes = match self.subscribers.get(topic) {
@@ -492,6 +566,12 @@ impl LocalInner {
                 return;
             }
         };
+        if matches!(cmd, Command::Grab { .. } | Command::Release { .. })
+            && self.authority() != self.origin
+        {
+            self.request(pane, &cmd);
+            return;
+        }
         let Err(err) = self.apply(pane, &cmd) else {
             return;
         };
@@ -535,11 +615,78 @@ impl LocalInner {
         });
         Ok(())
     }
-    /// Drop every object `pane` holds.
+    fn authority(&self) -> HostId {
+        self.peers
+            .first()
+            .map_or(self.origin, |peer| self.origin.min(*peer))
+    }
+    /// Send `cmd` of `pane` to the authority.
+    fn request(
+        &self,
+        pane: PaneId,
+        cmd: &Command,
+    ) {
+        debug!("pane {pane} {cmd:?} to the authority");
+        let msg = Message {
+            value: json!({ "pane": pane, "cmd": cmd }),
+            origin: self.origin,
+            seq: None,
+            ts: None,
+        };
+        if let Some(tap) = &self.tap {
+            let _ = tap.send((REQUEST.to_owned(), msg));
+        }
+    }
+    /// Apply another host's request, as the authority, from one of that host's panes.
+    fn answer(
+        &mut self,
+        msg: Message,
+    ) -> bool {
+        if self.authority() != self.origin {
+            return false;
+        }
+        let pane = msg.value["pane"]
+            .as_str()
+            .and_then(|pane| pane.parse::<PaneId>().ok());
+        let cmd = serde_json::from_value::<Command>(msg.value["cmd"].clone());
+        match (pane, cmd) {
+            (Some(pane), Ok(cmd @ (Command::Grab { .. } | Command::Release { .. })))
+                if pane.host == msg.origin =>
+            {
+                self.command(pane, serde_json::to_value(cmd).unwrap());
+                true
+            }
+            _ => {
+                warn!("host {} sent a bad request", msg.origin);
+                false
+            }
+        }
+    }
+    /// Let go of held objects that are no longer in the scene.
+    fn prune_owners(&mut self) {
+        let Ok(scene) = self.scene() else { return };
+        let mut owners = self.owners();
+        owners
+            .owners
+            .retain(|id, _holder| scene.object(id).is_some());
+        let _ = self.retain_owners(&owners);
+    }
+    /// Drop every object `pane` holds, or ask the authority to.
     fn release(
         &mut self,
         pane: PaneId,
     ) {
+        if self.authority() != self.origin {
+            for (id, _holder) in self
+                .owners()
+                .owners
+                .iter()
+                .filter(|(_id, holder)| **holder == pane)
+            {
+                self.request(pane, &Command::Release { id: id.clone() });
+            }
+            return;
+        }
         let mut owners = self.owners();
         owners.owners.retain(|_id, holder| *holder != pane);
         let _ = self.retain_owners(&owners);
@@ -610,7 +757,10 @@ impl LocalInner {
                 owners.owners.retain(|id, _holder| !ids.contains(id));
                 self.retain_scene(&scene)?;
                 self.retain_selection(&selection)?;
-                self.retain_owners(&owners)?;
+                // Elsewhere the authority prunes `owners` when this scene reaches it.
+                if self.authority() == self.origin {
+                    self.retain_owners(&owners)?;
+                }
             }
             Command::SetProperty { ids, key, value } => {
                 if ids.is_empty() {
@@ -1363,6 +1513,44 @@ mod test {
     }
 
     #[test]
+    fn test_owners_reset_keeps_other_hosts() {
+        let path = tmp();
+        let bus = open(&path);
+        add(&bus, "a");
+        add(&bus, "b");
+        let theirs = PaneId::new(HostId(0xdef), 1);
+        command(&bus, pid(1), grab("a"));
+        command(&bus, theirs, grab("b"));
+        bus.save().unwrap();
+        let again = open(&path);
+        assert_eq!(holder(&again, "a"), None);
+        assert_eq!(holder(&again, "b"), Some(theirs));
+        // With nothing of this host's to drop, the copy is not rewritten, so it cannot win
+        // over a newer one on another host.
+        again.save().unwrap();
+        let seq = again.retained(Topic::OWNERS).unwrap().seq;
+        let third = open(&path);
+        assert_eq!(third.retained(Topic::OWNERS).unwrap().seq, seq);
+        assert_eq!(holder(&third, "b"), Some(theirs));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn test_fresh_ignores_the_file() {
+        let path = tmp();
+        let bus = open(&path);
+        add(&bus, "a");
+        bus.save().unwrap();
+        let fresh = Local::fresh(&path, HOST);
+        assert_eq!(fresh.retained(Topic::SCENE), None);
+        assert_eq!(fresh.retained(Topic::PROTOCOL).unwrap().seq, Some(1));
+        // Its first save replaces the old copy.
+        fresh.save().unwrap();
+        assert_eq!(open(&path).retained(Topic::SCENE), None);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn test_set_property_many() {
         let bus = open(&tmp());
         bus.subscribe(pid(2), Topic::SCENE);
@@ -1452,7 +1640,8 @@ mod test {
 
     #[test]
     fn deliver_keeps_the_newest() {
-        let bus = open(&tmp().join("bus.json"));
+        let path = tmp();
+        let bus = open(&path);
         let mut tap = bus.tap();
         bus.set_kind(pid(1), "view2d");
         bus.subscribe(pid(1), "view2d/view");
@@ -1479,5 +1668,87 @@ mod test {
         assert_eq!(bus.retained("view2d/view").unwrap().seq, Some(2));
         let queued = bus.take_queued();
         assert_eq!(queued.len(), 3);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn test_rejections_stay_here() {
+        let bus = open(&tmp());
+        let mut tap = bus.tap();
+        bus.set_kind(pid(1), "view2d");
+        bus.subscribe(pid(1), &Topic::rejected(pid(1)));
+        bus.publish(pid(1), "clock/text", json!("x"), true);
+        assert_eq!(topics(&bus.take_queued()).len(), 1);
+        assert!(tap.try_recv().is_err());
+    }
+
+    #[test]
+    fn deliver_drops_drags_of_non_holders() {
+        let path = tmp();
+        let bus = open(&path);
+        bus.seed();
+        let other = HostId(HOST.0 + 1);
+        bus.subscribe(pid(1), &Topic::drag("seed-box"));
+        command(&bus, pid(1), grab("seed-box"));
+        let drag = |origin| Message {
+            value: json!({ "id": "seed-box", "position": [1.0, 0.0, 0.0] }),
+            origin,
+            seq: None,
+            ts: Some(1),
+        };
+        assert!(!bus.deliver(&Topic::drag("seed-box"), drag(other)));
+        assert!(!bus.deliver(&Topic::drag("seed-ball"), drag(HOST)));
+        assert!(bus.deliver(&Topic::drag("seed-box"), drag(HOST)));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn grabs_go_to_the_authority() {
+        let path = tmp();
+        let bus = open(&path);
+        bus.seed();
+        let mut tap = bus.tap();
+        let lower = HostId(HOST.0 - 1);
+        bus.peer_up(lower);
+        assert_eq!(bus.authority(), lower);
+
+        // A grab here is a request, not a write of `owners`.
+        let owners = bus.retained(Topic::OWNERS);
+        command(&bus, pid(1), grab("seed-box"));
+        assert_eq!(bus.retained(Topic::OWNERS), owners);
+        let sent: Vec<_> = std::iter::from_fn(|| tap.try_recv().ok()).collect();
+        let (topic, request) = sent.last().unwrap();
+        assert_eq!(topic, REQUEST);
+        assert_eq!(
+            request.value["cmd"],
+            json!({ "cmd": "grab", "id": "seed-box" })
+        );
+        // Nor does this host answer requests while it is not the authority.
+        let theirs = PaneId::new(lower, 1);
+        let ask = |pane: PaneId, cmd| Message {
+            value: json!({ "pane": pane, "cmd": cmd }),
+            origin: pane.host,
+            seq: None,
+            ts: None,
+        };
+        assert!(!bus.deliver(REQUEST, ask(theirs, grab("seed-box"))));
+
+        // Once the authority is gone, this host decides: it grants, and denies another
+        // host's grab of a held object on that pane's `rejected/<pane>`, sent out.
+        bus.peer_down(lower);
+        assert_eq!(bus.authority(), HOST);
+        command(&bus, pid(1), grab("seed-box"));
+        assert_eq!(holder(&bus, "seed-box"), Some(pid(1)));
+        let higher = PaneId::new(HostId(HOST.0 + 1), 1);
+        bus.peer_up(higher.host);
+        while tap.try_recv().is_ok() {}
+        assert!(bus.deliver(REQUEST, ask(higher, grab("seed-box"))));
+        let (topic, _msg) = tap.try_recv().unwrap();
+        assert_eq!(topic, Topic::rejected(higher));
+        // A request naming another host's pane is dropped.
+        let mut forged = ask(higher, grab("seed-ball"));
+        forged.origin = HOST;
+        assert!(!bus.deliver(REQUEST, forged));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

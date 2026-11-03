@@ -46,4 +46,21 @@ const stream = () => {
   assert.deepEqual(s.at(9010), [7, 0, 0]);
 }
 
+// The object passes to a pane on another host, whose `ts` counts from its own start: the
+// stream starts afresh even though the new `ts` is lower.
+{
+  const s = interpolate('drag/a');
+  s.push([0, 0, 0], 100, 110, 'A');
+  s.push([10, 0, 0], 110, 120, 'A');
+  s.push([50, 0, 0], 5, 130, 'B');
+  assert.equal(s.origin, 'B');
+  assert.deepEqual(s.at(130), [50, 0, 0]);
+  s.push([60, 0, 0], 15, 140, 'B');
+  assert.deepEqual(s.at(145), [55, 0, 0]);
+  // A push without an origin keeps the last one.
+  s.push([70, 0, 0], 25, 150);
+  assert.equal(s.origin, 'B');
+  assert.deepEqual(s.at(150), [60, 0, 0]);
+}
+
 console.log('interpolate: ok');

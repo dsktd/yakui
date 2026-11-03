@@ -13,7 +13,7 @@ Another pane's drag shows live and smooth; a drag that loses the grab eases back
   `Release { id }` when it is dropped, `SetView { view }` when pan or zoom comes to rest.
 - Events (Rust half -> web half): `State { scene, selection, owners, view }` (the
   snapshot), `Scene { scene }`, `Selection { selection }`, `Owners { owners }`,
-  `Drag { topic, id, position, ts }`, `Denied { id, reason }` (a lost grab), `Hover { hover }`,
+  `Drag { topic, id, position, ts, origin }`, `Denied { id, reason }` (a lost grab), `Hover { hover }`,
   `Focus { id }`, `View { view }`, `Rejected { reason }`, `Unsupported { version }`.
 - Topics subscribed: `scene`, `selection`, `owners`, `protocol` (retained, standard); `hover`,
   `focus`, `rejected/<pane>`, `drag/<id>` for every object in `scene` (transient, standard);

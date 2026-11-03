@@ -240,10 +240,10 @@ pane depends on are written down in its README section.
 Built 2026-11-01, as PROTOCOL.md says, with these choices:
 
 - The scene schema is PROTOCOL.md's: `scene = { objects: [Object] }`,
-  `Object = { id, name, kind, position: [x,y,z], size: [x,y,z], color:
-"#rrggbb", props? }`; view2d shows the x/y plane (y up), view3d the same
-  scene with an orbit camera. Panes read it with the tolerant readers in
-  `pane-api::protocol` (a bad object is skipped, a bad topic reads as empty).
+  `Object = { id, name, kind, position: [x,y,z], size: [x,y,z], color: "#rrggbb", props? }`;
+  view2d shows the x/y plane (y up), view3d the same scene with an orbit
+  camera. Panes read it with the tolerant readers in `pane-api::protocol`
+  (a bad object is skipped, a bad topic reads as empty).
 - Seeding: the host retains four objects (fixed ids) as `scene` when a
   space's bus has none, before any pane subscribes; a viewport never seeds
   and tolerates a missing `scene`.
@@ -314,6 +314,11 @@ iroh` adds it, the default build is unchanged. Pinned: `iroh` 1.4,
   the gossip topic and this host's address. `Relays::Default` uses iroh's
   public relays and address lookup (hosts behind NAT); `Relays::Off` dials
   direct addresses only (LAN, tests).
+- **Every ticket holder is trusted.** `Local::deliver` checks nothing a peer
+  sends but who holds a dragged object: not the topic's kind or prefix,
+  not `check_size`. A peer can retain any topic up to the gossip limit
+  (`MAX_WIRE`, 512 KiB, twice a local write's 256 KiB), and it is saved to
+  `bus.json`. Share a ticket only with hosts you would let write the space.
 - Tested: two in-process hosts, relays off: a retained topic written before
   the join converges, a transient message reaches the other host's
   subscriber, a later write on either side wins on both.
@@ -321,10 +326,12 @@ iroh` adds it, the default build is unchanged. Pinned: `iroh` 1.4,
 - **CLI** (feature `iroh`): `host --share <space>` opens that space on an
   `IrohBus`, prints its ticket and serves it at `/s/<space>/ticket`;
   `host --share <space> --join <ticket>` joins another host's; `--no-relays`
-  for LAN/tests. Other spaces stay on `Local`.
+  for LAN/tests. Other spaces stay on `Local`. A joining host starts with
+  nothing retained and does not seed: it takes the shared copy, which its
+  old `bus.json` would otherwise beat wherever that has the higher seq.
 
-Left: picking the bus from per-space config (today only the flag); command authority for standard topics (today every host applies commands
-and the newest `scene` wins); remote pane modules and their msg/event relay;
+Left: command authority for standard topics other than grabs (every host applies
+them and the newest `scene` wins); remote pane modules and their msg/event relay;
 blobs.
 
 ## Drags: streams, grabs and rollback (2026-11-02)
@@ -351,18 +358,49 @@ Cal's spec, hand-rolled (no ggrs, lightyear or naia):
   outline and eases over to the holder's stream. Only the holder's drags
   pass the host, and only the holder may `move_object` a held object. A
   holder lets go on `release`, when its pane goes, or when the client
-  connection that last drove its pane closes; `owners` starts empty on
-  every host start.
+  connection that last drove its pane closes; a host start drops the grabs
+  of that host's panes (only those, so a restart in a shared space keeps
+  the other hosts' grabs).
 
 Later sync slots in beside this rather than replacing it: every transient
 message carries `{origin, ts}` (a monotonic clock per host) and every
 retained one `{origin, seq}`, so a stream can be reordered and spaced per
 origin and a retained topic's versions ordered by `(seq, origin)`, which is what a
 CRDT (a per-object last-writer-wins register keyed by `(seq, origin)`) or a
-lightyear-style replication layer needs as input. The host stays the one
-authority for `owners`, so with `IrohBus` a grab is forwarded to the
-authority like any other command, and `drag/<id>` rides gossip as a
-transient topic.
+lightyear-style replication layer needs as input. With `IrohBus`,
+`drag/<id>` rides gossip as a transient topic, and grabs have one authority
+per space (below).
+
+### Grab authority across hosts (2026-11-03)
+
+- **Who**: the authority of a shared space is the lowest `HostId` among this
+  host and its current gossip neighbours. Each host sends a `host/hello`
+  (its `HostId`) to every new neighbour, and forgets that id on
+  `NeighborDown`, so every host works it out alone; no election messages.
+- **Only the authority writes `owners`.** Elsewhere `grab` and `release` (and
+  the releases of a pane that goes) are not applied: they go out on
+  `host/request` as `{ pane, cmd }`, and the authority applies them like its
+  own panes' commands. A denied one comes back as `rejected/<pane>` (sent to
+  other hosts only for their panes), so the requesting pane rolls back by
+  the existing path. A non-authority's `remove_objects` leaves `owners`
+  alone; the authority prunes held ids missing from a `scene` it receives.
+  `owners` itself still converges by `(seq, origin)`.
+- **Authority loss**: on `NeighborDown` the next lowest host takes over with
+  the `owners` it already has, and drops the grabs of the gone host's panes.
+  A request sent to the old authority and lost with it gets no answer: the
+  pane keeps its prediction, its drags are dropped, and its drop still
+  lands as `move_object` once nobody holds the object.
+- **`deliver` checks the holder**: another host's `drag/<id>` is dropped
+  unless `owners` says a pane of that host holds `id`; a `host/request` is
+  dropped unless this host is the authority and the pane is the sender's.
+- Gaps: while neighbour views differ (a join, a leave, a gossip swarm larger
+  than one active view, about five hosts), two hosts can each believe they
+  are the authority for a moment; the newer `owners` wins as before.
+- **Bus per space**: `<space>/space.json` `{ "bus": "iroh", "join":
+  "<ticket>", "relays": false }` (`join` and `relays` optional) opens that
+  space on an `IrohBus` at start; `{ "bus": "local" }` or no file keeps
+  `Local`. `--share` overrides the file for its space. The default build
+  (no `iroh` feature) does not read it.
 
 ## Future option: WASM panes (parked)
 
