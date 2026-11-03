@@ -240,10 +240,10 @@ pane depends on are written down in its README section.
 Built 2026-11-01, as PROTOCOL.md says, with these choices:
 
 - The scene schema is PROTOCOL.md's: `scene = { objects: [Object] }`,
-  `Object = { id, name, kind, position: [x,y,z], size: [x,y,z], color:
-"#rrggbb", props? }`; view2d shows the x/y plane (y up), view3d the same
-  scene with an orbit camera. Panes read it with the tolerant readers in
-  `pane-api::protocol` (a bad object is skipped, a bad topic reads as empty).
+  `Object = { id, name, kind, position: [x,y,z], size: [x,y,z], color: "#rrggbb", props? }`;
+  view2d shows the x/y plane (y up), view3d the same scene with an orbit
+  camera. Panes read it with the tolerant readers in `pane-api::protocol`
+  (a bad object is skipped, a bad topic reads as empty).
 - Seeding: the host retains four objects (fixed ids) as `scene` when a
   space's bus has none, before any pane subscribes; a viewport never seeds
   and tolerates a missing `scene`.
