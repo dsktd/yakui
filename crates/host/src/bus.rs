@@ -166,8 +166,8 @@ impl Local {
         }
         let _ = bus.retain_scene(&seed_scene());
     }
-    /// Every message this host publishes from now on, to carry to other hosts. Messages
-    /// put in with [`Local::deliver`] are not repeated here.
+    /// Every message this host publishes from now on, to carry to other hosts, but for
+    /// `rejected/<pane>`. Messages put in with [`Local::deliver`] are not repeated here.
     pub fn tap(&self) -> UnboundedReceiver<(String, Message)> {
         let (tx, rx) = unbounded_channel();
         self.0.lock().unwrap().tap = Some(tx);
@@ -460,7 +460,10 @@ impl LocalInner {
         topic: &str,
         msg: Message,
     ) {
-        if let Some(tap) = &self.tap {
+        // A rejection is for one pane here, nothing other hosts need.
+        if let Some(tap) = &self.tap
+            && !topic.starts_with("rejected/")
+        {
             let _ = tap.send((topic.to_owned(), msg.clone()));
         }
         let panes = match self.subscribers.get(topic) {
@@ -1505,5 +1508,16 @@ mod test {
         assert_eq!(bus.retained("view2d/view").unwrap().seq, Some(2));
         let queued = bus.take_queued();
         assert_eq!(queued.len(), 3);
+    }
+
+    #[test]
+    fn test_rejections_stay_here() {
+        let bus = open(&tmp());
+        let mut tap = bus.tap();
+        bus.set_kind(pid(1), "view2d");
+        bus.subscribe(pid(1), &Topic::rejected(pid(1)));
+        bus.publish(pid(1), "clock/text", json!("x"), true);
+        assert_eq!(topics(&bus.take_queued()).len(), 1);
+        assert!(tap.try_recv().is_err());
     }
 }
