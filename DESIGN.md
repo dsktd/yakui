@@ -314,6 +314,11 @@ iroh` adds it, the default build is unchanged. Pinned: `iroh` 1.4,
   the gossip topic and this host's address. `Relays::Default` uses iroh's
   public relays and address lookup (hosts behind NAT); `Relays::Off` dials
   direct addresses only (LAN, tests).
+- **Every ticket holder is trusted.** `Local::deliver` checks nothing a peer
+  sends: not the topic's kind or prefix, not `check_size`, not who holds a
+  dragged object. A peer can retain any topic up to the gossip limit
+  (`MAX_WIRE`, 512 KiB, twice a local write's 256 KiB), and it is saved to
+  `bus.json`. Share a ticket only with hosts you would let write the space.
 - Tested: two in-process hosts, relays off: a retained topic written before
   the join converges, a transient message reaches the other host's
   subscriber, a later write on either side wins on both.
@@ -351,18 +356,23 @@ Cal's spec, hand-rolled (no ggrs, lightyear or naia):
   outline and eases over to the holder's stream. Only the holder's drags
   pass the host, and only the holder may `move_object` a held object. A
   holder lets go on `release`, when its pane goes, or when the client
-  connection that last drove its pane closes; `owners` starts empty on
-  every host start.
+  connection that last drove its pane closes; a host start drops the grabs
+  of that host's panes (only those, so a restart in a shared space keeps
+  the other hosts' grabs).
 
 Later sync slots in beside this rather than replacing it: every transient
 message carries `{origin, ts}` (a monotonic clock per host) and every
 retained one `{origin, seq}`, so a stream can be reordered and spaced per
 origin and a retained topic's versions ordered by `(seq, origin)`, which is what a
 CRDT (a per-object last-writer-wins register keyed by `(seq, origin)`) or a
-lightyear-style replication layer needs as input. The host stays the one
-authority for `owners`, so with `IrohBus` a grab is forwarded to the
-authority like any other command, and `drag/<id>` rides gossip as a
-transient topic.
+lightyear-style replication layer needs as input. With `IrohBus`,
+`drag/<id>` rides gossip as a transient topic, but grabs are still decided
+per host: there is no single authority and nothing forwards a grab. Known
+gap: two hosts can grant the same object at once, the whole `owners` map is
+last-writer-wins by `(seq, origin)`, so one grant is lost silently, and
+`Local::deliver` passes another host's `drag/<id>` without checking who
+holds the object. Closing it needs an authority per object (or per space)
+that other hosts forward grabs to.
 
 ## Future option: WASM panes (parked)
 
