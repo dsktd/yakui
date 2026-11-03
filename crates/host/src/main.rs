@@ -13,6 +13,18 @@ struct Cli {
     /// Layout file and pane storage; default: the user's data dir + yakui.
     #[arg(long)]
     dir: Option<PathBuf>,
+    /// Share this space over iroh: print its ticket, serve it at `/s/<space>/ticket`.
+    #[cfg(feature = "iroh")]
+    #[arg(long)]
+    share: Option<host::space::SpaceId>,
+    /// Join the shared space of this ticket as the `--share` space.
+    #[cfg(feature = "iroh")]
+    #[arg(long, requires = "share")]
+    join: Option<host::iroh_bus::Ticket>,
+    /// Dial the ticket's direct addresses only, no iroh relays: one LAN or tests.
+    #[cfg(feature = "iroh")]
+    #[arg(long, requires = "share")]
+    no_relays: bool,
 }
 
 #[tokio::main]
@@ -33,5 +45,14 @@ async fn main() -> Result<()> {
     registry.add::<pane_view3d::View3d>();
     registry.add::<pane_widgets::Widgets>();
     let host = Host::open(dir, registry)?;
+    #[cfg(feature = "iroh")]
+    if let Some(space) = cli.share {
+        let relays = match cli.no_relays {
+            true => host::iroh_bus::Relays::Off,
+            false => host::iroh_bus::Relays::Default,
+        };
+        let ticket = host.share(&space, cli.join, relays).await?;
+        println!("{ticket}");
+    }
     server::serve(host, cli.port).await
 }

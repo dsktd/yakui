@@ -89,11 +89,23 @@ pub async fn serve(
         .route("/widgets/{name}", get(legacy_widget))
         .route("/modules/{kind}", get(module))
         .route("/ws", get(ws))
+        .route("/s/{space}/ticket", get(ticket))
         .with_state(host);
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await?;
     info!("http://{}", listener.local_addr()?);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// The space's iroh ticket as text, 404 if it is not shared.
+async fn ticket(
+    State(host): State<Host>,
+    Path(space): Path<SpaceId>,
+) -> Response {
+    match host.ticket(&space) {
+        Some(ticket) => ticket.into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn index() -> Html<String> {
