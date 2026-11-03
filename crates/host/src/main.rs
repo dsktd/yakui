@@ -46,13 +46,18 @@ async fn main() -> Result<()> {
     registry.add::<pane_widgets::Widgets>();
     let host = Host::open(dir, registry)?;
     #[cfg(feature = "iroh")]
-    if let Some(space) = cli.share {
-        let relays = match cli.no_relays {
-            true => host::iroh_bus::Relays::Off,
-            false => host::iroh_bus::Relays::Default,
-        };
-        let ticket = host.share(&space, cli.join, relays).await?;
-        println!("{ticket}");
+    {
+        for (space, ticket) in host.share_configured(cli.share.as_ref()).await? {
+            println!("{space} {ticket}");
+        }
+        if let Some(space) = cli.share {
+            let relays = match cli.no_relays {
+                true => host::iroh_bus::Relays::Off,
+                false => host::iroh_bus::Relays::Default,
+            };
+            let ticket = host.share(&space, cli.join, relays).await?;
+            println!("{ticket}");
+        }
     }
     server::serve(host, cli.port).await
 }

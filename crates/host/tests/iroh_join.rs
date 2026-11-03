@@ -79,3 +79,28 @@ async fn joining_host_takes_the_shared_scene() {
     }
     panic!("scene did not converge");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn space_config_picks_the_bus() {
+    let (a, a_dir) = host();
+    let shared = SpaceId::random();
+    let local = SpaceId::random();
+    let skipped = SpaceId::random();
+    for (id, config) in [
+        (&shared, r#"{ "bus": "iroh", "relays": false }"#),
+        (&local, r#"{ "bus": "local" }"#),
+        (&skipped, r#"{ "bus": "iroh", "relays": false }"#),
+    ] {
+        let dir = a_dir.join(id.as_str());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("space.json"), config).unwrap();
+    }
+
+    let tickets = a.share_configured(Some(&skipped)).await.unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0].0, shared);
+    assert!(a.ticket(&shared).is_some());
+    assert!(a.ticket(&local).is_none());
+    assert!(a.ticket(&skipped).is_none());
+    std::fs::remove_dir_all(a_dir).unwrap();
+}

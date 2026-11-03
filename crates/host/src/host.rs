@@ -95,6 +95,31 @@ impl Host {
         host.tickets.insert(id.clone(), ticket.to_string());
         Ok(ticket)
     }
+    /// Share every space whose `<space>/space.json` asks for an iroh bus, but `skip` (the
+    /// `--share` space, whose flags win). Returns each one's ticket.
+    #[cfg(feature = "iroh")]
+    pub async fn share_configured(
+        &self,
+        skip: Option<&SpaceId>,
+    ) -> Result<Vec<(SpaceId, crate::iroh_bus::Ticket)>> {
+        let dir = self.0.lock().unwrap().dir.clone();
+        let mut shared = Vec::new();
+        for entry in std::fs::read_dir(&dir)? {
+            let Ok(id) = entry?.file_name().to_string_lossy().parse::<SpaceId>() else {
+                continue;
+            };
+            if Some(&id) == skip {
+                continue;
+            }
+            let Some((ticket, relays)) = BusConfig::read(&space_dir(&dir, &id))?.iroh()? else {
+                continue;
+            };
+            let ticket = self.share(&id, ticket, relays).await?;
+            info!("space {id} shared over iroh");
+            shared.push((id, ticket));
+        }
+        Ok(shared)
+    }
     /// The ticket of space `id`, if it is shared over iroh.
     pub fn ticket(
         &self,
@@ -107,6 +132,49 @@ impl Host {
         kind: &str,
     ) -> Option<&'static str> {
         self.0.lock().unwrap().registry.module(kind)
+    }
+}
+
+/// Which bus a space opens on, from `<space>/space.json`; no file is [`BusConfig::Local`].
+#[cfg(feature = "iroh")]
+#[derive(serde::Deserialize, Default, Debug, PartialEq)]
+#[serde(tag = "bus", rename_all = "lowercase")]
+enum BusConfig {
+    #[default]
+    Local,
+    /// An `IrohBus`: a new shared space, or the one `join` names.
+    Iroh {
+        join: Option<String>,
+        #[serde(default = "relays_on")]
+        relays: bool,
+    },
+}
+#[cfg(feature = "iroh")]
+fn relays_on() -> bool {
+    true
+}
+#[cfg(feature = "iroh")]
+impl BusConfig {
+    fn read(dir: &Path) -> Result<Self> {
+        let path = dir.join("space.json");
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).map_err(|err| anyhow!("{}: {err}", path.display()))
+            }
+            Err(_) => Ok(Self::default()),
+        }
+    }
+    /// The ticket to join and the relays, if the space is shared.
+    fn iroh(self) -> Result<Option<(Option<crate::iroh_bus::Ticket>, crate::iroh_bus::Relays)>> {
+        let Self::Iroh { join, relays } = self else {
+            return Ok(None);
+        };
+        let ticket = join.map(|join| join.parse()).transpose()?;
+        let relays = match relays {
+            true => crate::iroh_bus::Relays::Default,
+            false => crate::iroh_bus::Relays::Off,
+        };
+        Ok(Some((ticket, relays)))
     }
 }
 
@@ -158,6 +226,31 @@ mod test {
         assert_eq!(
             space_dir(Path::new("/data"), &id),
             PathBuf::from("/data/0123456789abcdef")
+        );
+    }
+
+    #[cfg(feature = "iroh")]
+    #[test]
+    fn test_bus_config() {
+        let parse = |json: &str| serde_json::from_str::<BusConfig>(json).unwrap();
+        assert_eq!(parse(r#"{ "bus": "local" }"#), BusConfig::Local);
+        assert_eq!(
+            parse(r#"{ "bus": "iroh" }"#),
+            BusConfig::Iroh {
+                join: None,
+                relays: true
+            }
+        );
+        assert_eq!(
+            parse(r#"{ "bus": "iroh", "relays": false }"#),
+            BusConfig::Iroh {
+                join: None,
+                relays: false
+            }
+        );
+        assert_eq!(
+            BusConfig::read(Path::new("/nonexistent")).unwrap(),
+            BusConfig::Local
         );
     }
 }
