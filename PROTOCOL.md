@@ -95,14 +95,15 @@ time). A message on `cmd` that is not a command at all is logged and
 dropped: `rejected/<pane>` carries the typed command, so there is nothing to
 echo.
 
-`grab` and `release` bracket a drag. Grabs are decided per host, in arrival
-order: the first wins, a later one is rejected on `rejected/<pane>` like
+`grab` and `release` bracket a drag. Grabs are decided in arrival order by
+one host, the space's authority: the first wins, a later one is rejected on `rejected/<pane>` like
 any other command (`cmd` is the `grab`, `reason` names the holder), and the
 loser drops its local drag and follows the holder's `drag/<id>`. A holder
 lets go by `release`, or when its pane is removed, or when the client
 connection that last drove the pane closes. In a space shared by several
-hosts nothing arbitrates between them yet: two hosts can each grant the same
-object, and the newer `owners` wins whole, so one grant is lost silently.
+hosts the authority is the lowest host id among a host and its neighbours;
+other hosts forward `grab` and `release` to it (DESIGN.md, "Grab authority
+across hosts").
 
 ## 3. Widget events
 
