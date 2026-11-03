@@ -77,8 +77,16 @@ impl Host {
             (space_dir(&host.dir, id), host.registry.clone(), host.id)
         };
         std::fs::create_dir_all(&dir)?;
-        let local = Local::open(dir.join("bus.json"), host)?;
-        local.seed();
+        // A joining host takes the shared copy: its own old one could win where its seq is
+        // higher, and a seed of its own would race the shared scene.
+        let local = match ticket {
+            Some(_) => Local::fresh(dir.join("bus.json"), host),
+            None => {
+                let local = Local::open(dir.join("bus.json"), host)?;
+                local.seed();
+                local
+            }
+        };
         let bus = IrohBus::join(local, ticket, relays).await?;
         let ticket = bus.ticket().await;
         let space = Space::open_on(dir, registry, host, Arc::new(bus))?;

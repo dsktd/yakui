@@ -132,6 +132,24 @@ impl Local {
                 Err(err) => warn!("{}: dropped {topic}: {err}", path.display()),
             }
         }
+        info!("{} retained topics from {}", retained.len(), path.display());
+        Ok(Self::with(path, origin, retained))
+    }
+    /// A bus that starts with nothing retained, whatever `path` holds, for a host joining a
+    /// shared space: its old copy would otherwise win over the shared one wherever its seq is
+    /// higher. The shared copy comes from the other hosts, and the next save replaces `path`.
+    pub fn fresh(
+        path: impl Into<PathBuf>,
+        origin: HostId,
+    ) -> Self {
+        Self::with(path.into(), origin, BTreeMap::new())
+    }
+    /// A bus holding `retained`, with `protocol` retained and this host's grabs dropped.
+    fn with(
+        path: PathBuf,
+        origin: HostId,
+        retained: BTreeMap<String, Message>,
+    ) -> Self {
         let mut inner = LocalInner {
             origin,
             epoch: Instant::now(),
@@ -150,12 +168,7 @@ impl Local {
         let mut owners = inner.owners();
         owners.owners.retain(|_id, holder| holder.host != origin);
         let _ = inner.retain_owners(&owners);
-        info!(
-            "{} retained topics from {}",
-            inner.retained.len(),
-            inner.path.display()
-        );
-        Ok(Self(Arc::new(Mutex::new(inner))))
+        Self(Arc::new(Mutex::new(inner)))
     }
     /// Retain [`seed_scene`] if the bus has no `scene`, so a fresh space shows something
     /// before its first subscriber gets its retained message.
@@ -1388,6 +1401,21 @@ mod test {
         let third = open(&path);
         assert_eq!(third.retained(Topic::OWNERS).unwrap().seq, seq);
         assert_eq!(holder(&third, "b"), Some(theirs));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn test_fresh_ignores_the_file() {
+        let path = tmp();
+        let bus = open(&path);
+        add(&bus, "a");
+        bus.save().unwrap();
+        let fresh = Local::fresh(&path, HOST);
+        assert_eq!(fresh.retained(Topic::SCENE), None);
+        assert_eq!(fresh.retained(Topic::PROTOCOL).unwrap().seq, Some(1));
+        // Its first save replaces the old copy.
+        fresh.save().unwrap();
+        assert_eq!(open(&path).retained(Topic::SCENE), None);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

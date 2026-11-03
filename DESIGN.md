@@ -326,7 +326,9 @@ iroh` adds it, the default build is unchanged. Pinned: `iroh` 1.4,
 - **CLI** (feature `iroh`): `host --share <space>` opens that space on an
   `IrohBus`, prints its ticket and serves it at `/s/<space>/ticket`;
   `host --share <space> --join <ticket>` joins another host's; `--no-relays`
-  for LAN/tests. Other spaces stay on `Local`.
+  for LAN/tests. Other spaces stay on `Local`. A joining host starts with
+  nothing retained and does not seed: it takes the shared copy, which its
+  old `bus.json` would otherwise beat wherever that has the higher seq.
 
 Left: picking the bus from per-space config (today only the flag); command authority for standard topics (today every host applies commands
 and the newest `scene` wins); remote pane modules and their msg/event relay;
