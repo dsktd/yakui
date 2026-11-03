@@ -107,7 +107,18 @@ impl Space {
         std::fs::create_dir_all(&dir)?;
         let local = Local::open(dir.join("bus.json"), host)?;
         local.seed();
-        let bus: Arc<dyn Bus> = Arc::new(local);
+        Self::open_on(dir, registry, host, Arc::new(local))
+    }
+    /// [`Space::open`] on a bus made by the caller, such as an `IrohBus` around the space's
+    /// `Local` (its `bus.json`, seeded).
+    pub fn open_on(
+        dir: impl Into<PathBuf>,
+        registry: Registry,
+        host: HostId,
+        bus: Arc<dyn Bus>,
+    ) -> Result<Self> {
+        let dir = dir.into();
+        std::fs::create_dir_all(&dir)?;
         let path = dir.join("layout.json");
         let layout = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)?,
@@ -138,6 +149,12 @@ impl Space {
         };
         inner.settle()?;
         Ok(Self(Arc::new(Mutex::new(inner))))
+    }
+    pub fn retained(
+        &self,
+        topic: &str,
+    ) -> Option<pane_api::Message> {
+        self.0.lock().unwrap().bus.retained(topic)
     }
     pub fn subscribe(&self) -> broadcast::Receiver<Frame> {
         self.0.lock().unwrap().tx.subscribe()
