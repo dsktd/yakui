@@ -1481,7 +1481,8 @@ mod test {
 
     #[test]
     fn deliver_keeps_the_newest() {
-        let bus = open(&tmp().join("bus.json"));
+        let path = tmp();
+        let bus = open(&path);
         let mut tap = bus.tap();
         bus.set_kind(pid(1), "view2d");
         bus.subscribe(pid(1), "view2d/view");
@@ -1508,6 +1509,7 @@ mod test {
         assert_eq!(bus.retained("view2d/view").unwrap().seq, Some(2));
         let queued = bus.take_queued();
         assert_eq!(queued.len(), 3);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
