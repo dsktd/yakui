@@ -145,8 +145,11 @@ impl Local {
             tap: None,
         };
         inner.publish(None, Topic::PROTOCOL, json!({ "version": VERSION }), true);
-        // No pane holds anything across a restart.
-        inner.publish(None, Topic::OWNERS, json!({ "owners": {} }), true);
+        // No pane of this host holds anything across a restart. Other hosts' grabs stay: when
+        // the bus is shared, a newer copy without them would drop them everywhere.
+        let mut owners = inner.owners();
+        owners.owners.retain(|_id, holder| holder.host != origin);
+        let _ = inner.retain_owners(&owners);
         info!(
             "{} retained topics from {}",
             inner.retained.len(),
@@ -1360,6 +1363,29 @@ mod test {
         command(&bus, pid(1), grab("a"));
         bus.save().unwrap();
         assert_eq!(holder(&open(&path), "a"), None);
+    }
+
+    #[test]
+    fn test_owners_reset_keeps_other_hosts() {
+        let path = tmp();
+        let bus = open(&path);
+        add(&bus, "a");
+        add(&bus, "b");
+        let theirs = PaneId::new(HostId(0xdef), 1);
+        command(&bus, pid(1), grab("a"));
+        command(&bus, theirs, grab("b"));
+        bus.save().unwrap();
+        let again = open(&path);
+        assert_eq!(holder(&again, "a"), None);
+        assert_eq!(holder(&again, "b"), Some(theirs));
+        // With nothing of this host's to drop, the copy is not rewritten, so it cannot win
+        // over a newer one on another host.
+        again.save().unwrap();
+        let seq = again.retained(Topic::OWNERS).unwrap().seq;
+        let third = open(&path);
+        assert_eq!(third.retained(Topic::OWNERS).unwrap().seq, seq);
+        assert_eq!(holder(&third, "b"), Some(theirs));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
