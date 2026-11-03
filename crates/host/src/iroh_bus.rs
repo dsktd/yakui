@@ -3,6 +3,7 @@
 //! host's. Retained topics converge by `(seq, origin)`: each host sends what it retains to
 //! every new neighbour, and keeps a copy only if it is newer than its own.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 use std::time::Instant;
@@ -36,6 +37,9 @@ use crate::Result;
 use crate::bus::Bus;
 use crate::bus::Held;
 use crate::bus::Local;
+
+/// Sent to each new neighbour: `origin` is this host's id, for [`Local::authority`].
+const HELLO: &str = "host/hello";
 
 /// Room for the largest retained value plus its envelope.
 const MAX_WIRE: usize = 512 * 1024;
@@ -152,13 +156,15 @@ impl IrohBus {
 }
 
 /// Send what `local` publishes, deliver what other hosts do, and hand every new neighbour
-/// what is retained here.
+/// what is retained here. Neighbours say who they are by [`HELLO`], so `local` knows which
+/// hosts share the space.
 async fn carry(
     local: Local,
     mut tap: UnboundedReceiver<(String, Message)>,
     mut sender: GossipSender,
     mut receiver: GossipReceiver,
 ) {
+    let mut hosts = HashMap::new();
     loop {
         tokio::select! {
             out = tap.recv() => {
@@ -168,12 +174,29 @@ async fn carry(
             event = receiver.try_next() => match event {
                 Ok(Some(Event::NeighborUp(peer))) => {
                     debug!("neighbour {} up", peer.fmt_short());
+                    let hello = Message {
+                        value: Value::Null,
+                        origin: local.origin(),
+                        seq: None,
+                        ts: None,
+                    };
+                    send(&mut sender, true, HELLO.to_owned(), hello).await;
                     for (topic, msg) in local.snapshot() {
                         send(&mut sender, true, topic, msg).await;
                     }
                 }
+                Ok(Some(Event::NeighborDown(peer))) => {
+                    debug!("neighbour {} down", peer.fmt_short());
+                    if let Some(host) = hosts.remove(&peer) {
+                        local.peer_down(host);
+                    }
+                }
                 Ok(Some(Event::Received(gossip))) => {
                     match serde_json::from_slice::<Wire>(&gossip.content) {
+                        Ok(wire) if wire.topic == HELLO => {
+                            hosts.insert(gossip.delivered_from, wire.msg.origin);
+                            local.peer_up(wire.msg.origin);
+                        }
                         Ok(wire) => {
                             local.deliver(&wire.topic, wire.msg);
                         }
@@ -361,5 +384,140 @@ mod tests {
         b.shutdown().await.unwrap();
         std::fs::remove_dir_all(a_dir).unwrap();
         std::fs::remove_dir_all(b_dir).unwrap();
+    }
+
+    fn grab(
+        bus: &IrohBus,
+        pane: PaneId,
+        id: &str,
+    ) {
+        let cmd = json!({ "cmd": "grab", "id": id });
+        bus.publish(pane, Topic::CMD, cmd, false);
+    }
+
+    fn holder(
+        bus: &IrohBus,
+        id: &str,
+    ) -> Option<PaneId> {
+        let owners = bus.retained(Topic::OWNERS)?;
+        pane_api::protocol::Owners::from_message(&owners.value).holder(id)
+    }
+
+    /// Whether `pane` was told its command was rejected, among what is queued on `bus`.
+    fn rejected(
+        bus: &IrohBus,
+        pane: PaneId,
+    ) -> bool {
+        let topic = Topic::rejected(pane);
+        bus.take_queued().iter().any(|(_pane, t, _msg)| *t == topic)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_of_two_concurrent_grabs_wins() {
+        let (a_local, a_dir) = local(1);
+        let (b_local, b_dir) = local(2);
+        a_local.seed();
+        let a_pane = PaneId::new(HostId(1), 1);
+        let b_pane = PaneId::new(HostId(2), 1);
+        let a = IrohBus::join(a_local, None, Relays::Off).await.unwrap();
+        let ticket = a.ticket().await;
+        let b = IrohBus::join(b_local, Some(ticket), Relays::Off)
+            .await
+            .unwrap();
+        until(|| b.local.authority() == HostId(1) && b.retained(Topic::SCENE).is_some()).await;
+        a.subscribe(a_pane, &Topic::rejected(a_pane));
+        b.subscribe(b_pane, &Topic::rejected(b_pane));
+
+        grab(&b, b_pane, "seed-box");
+        grab(&a, a_pane, "seed-box");
+        // The authority decides in arrival order: exactly one pane holds it on both hosts,
+        // and the other is told so.
+        let (mut a_lost, mut b_lost) = (false, false);
+        until(|| {
+            a_lost |= rejected(&a, a_pane);
+            b_lost |= rejected(&b, b_pane);
+            holder(&a, "seed-box").is_some()
+                && holder(&a, "seed-box") == holder(&b, "seed-box")
+                && a_lost != b_lost
+        })
+        .await;
+        let winner = holder(&a, "seed-box").unwrap();
+        assert_eq!(winner, if a_lost { b_pane } else { a_pane });
+
+        a.shutdown().await.unwrap();
+        b.shutdown().await.unwrap();
+        std::fs::remove_dir_all(a_dir).unwrap();
+        std::fs::remove_dir_all(b_dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn another_host_takes_over_when_the_authority_leaves() {
+        let (a_local, a_dir) = local(1);
+        let (b_local, b_dir) = local(2);
+        let (c_local, c_dir) = local(3);
+        a_local.seed();
+        let a_pane = PaneId::new(HostId(1), 1);
+        let b_pane = PaneId::new(HostId(2), 1);
+        let c_pane = PaneId::new(HostId(3), 1);
+        let a = IrohBus::join(a_local, None, Relays::Off).await.unwrap();
+        let b = IrohBus::join(b_local, Some(a.ticket().await), Relays::Off)
+            .await
+            .unwrap();
+        let mut ticket = a.ticket().await;
+        ticket.peers.extend(b.ticket().await.peers);
+        let c = IrohBus::join(c_local, Some(ticket), Relays::Off)
+            .await
+            .unwrap();
+        until(|| {
+            [&b, &c]
+                .iter()
+                .all(|bus| bus.local.authority() == HostId(1))
+                && c.local.snapshot().len() == a.local.snapshot().len()
+        })
+        .await;
+
+        grab(&a, a_pane, "seed-ball");
+        grab(&b, b_pane, "seed-box");
+        until(|| {
+            [&a, &b, &c].iter().all(|bus| {
+                holder(bus, "seed-box") == Some(b_pane) && holder(bus, "seed-ball") == Some(a_pane)
+            })
+        })
+        .await;
+
+        // a leaves: b is the lowest left, keeps b's grab and drops a's.
+        a.shutdown().await.unwrap();
+        until(|| {
+            [&b, &c]
+                .iter()
+                .all(|bus| bus.local.authority() == HostId(2))
+        })
+        .await;
+        until(|| {
+            [&b, &c]
+                .iter()
+                .all(|bus| holder(bus, "seed-ball").is_none())
+        })
+        .await;
+        assert_eq!(holder(&c, "seed-box"), Some(b_pane));
+
+        // Grabs still work through b: c gets a free object and is refused a held one.
+        c.subscribe(c_pane, &Topic::rejected(c_pane));
+        grab(&c, c_pane, "seed-ball");
+        until(|| {
+            [&b, &c]
+                .iter()
+                .all(|bus| holder(bus, "seed-ball") == Some(c_pane))
+        })
+        .await;
+        grab(&c, c_pane, "seed-box");
+        until(|| rejected(&c, c_pane)).await;
+        assert_eq!(holder(&b, "seed-box"), Some(b_pane));
+
+        b.shutdown().await.unwrap();
+        c.shutdown().await.unwrap();
+        for dir in [a_dir, b_dir, c_dir] {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 }
