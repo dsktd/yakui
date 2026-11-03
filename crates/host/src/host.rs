@@ -22,6 +22,8 @@ pub struct HostInner {
     id: HostId,
     registry: Registry,
     spaces: HashMap<SpaceId, Space>,
+    /// Tickets of the spaces shared over iroh, by [`Host::share`].
+    tickets: HashMap<SpaceId, String>,
 }
 
 impl Host {
@@ -38,6 +40,7 @@ impl Host {
             id,
             registry,
             spaces: HashMap::new(),
+            tickets: HashMap::new(),
         };
         Ok(Self(Arc::new(Mutex::new(inner))))
     }
@@ -53,6 +56,43 @@ impl Host {
         let space = Space::open(space_dir(&host.dir, id), host.registry.clone(), host.id)?;
         host.spaces.insert(id.clone(), space.clone());
         Ok(space)
+    }
+    /// Open space `id` on an `IrohBus`: a new shared space with no ticket, else the one the
+    /// ticket names. Fails if the space is already open on its local bus.
+    #[cfg(feature = "iroh")]
+    pub async fn share(
+        &self,
+        id: &SpaceId,
+        ticket: Option<crate::iroh_bus::Ticket>,
+        relays: crate::iroh_bus::Relays,
+    ) -> Result<crate::iroh_bus::Ticket> {
+        use crate::bus::Local;
+        use crate::iroh_bus::IrohBus;
+
+        let (dir, registry, host) = {
+            let host = self.0.lock().unwrap();
+            if host.spaces.contains_key(id) {
+                return Err(anyhow!("space {id} is already open"));
+            }
+            (space_dir(&host.dir, id), host.registry.clone(), host.id)
+        };
+        std::fs::create_dir_all(&dir)?;
+        let local = Local::open(dir.join("bus.json"), host)?;
+        local.seed();
+        let bus = IrohBus::join(local, ticket, relays).await?;
+        let ticket = bus.ticket().await;
+        let space = Space::open_on(dir, registry, host, Arc::new(bus))?;
+        let mut host = self.0.lock().unwrap();
+        host.spaces.insert(id.clone(), space);
+        host.tickets.insert(id.clone(), ticket.to_string());
+        Ok(ticket)
+    }
+    /// The ticket of space `id`, if it is shared over iroh.
+    pub fn ticket(
+        &self,
+        id: &SpaceId,
+    ) -> Option<String> {
+        self.0.lock().unwrap().tickets.get(id).cloned()
     }
     pub fn module(
         &self,

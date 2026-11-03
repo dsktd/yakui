@@ -8,6 +8,8 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::anyhow;
 use log::debug;
@@ -19,6 +21,7 @@ use pane_api::Message;
 use pane_api::PaneId;
 use pane_api::protocol::Command;
 use pane_api::protocol::Object;
+use pane_api::protocol::Owners;
 use pane_api::protocol::Rejected;
 use pane_api::protocol::Scene;
 use pane_api::protocol::Selection;
@@ -26,6 +29,9 @@ use pane_api::protocol::Topic;
 use pane_api::protocol::VERSION;
 use serde_json::Value;
 use serde_json::json;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::unbounded_channel;
 
 use crate::Result;
 
@@ -34,6 +40,9 @@ const QUEUE: usize = 256;
 
 /// The most a retained value may take as JSON, so a pane cannot fill bus.json.
 const MAX_RETAINED: usize = 256 * 1024;
+
+/// The least time between two messages on one `drag/<id>`: 60 a second.
+pub const STREAM_INTERVAL: Duration = Duration::from_micros(16_667);
 
 /// What a space needs of its bus, beyond what panes see. [`Local`] is the only
 /// implementation; one that gossips with other hosts would be another.
@@ -44,6 +53,11 @@ pub trait Bus: BusStore {
     ) -> Option<Message>;
     /// Drop every subscription and queued message of `pane`, when the pane goes.
     fn unsubscribe(
+        &self,
+        pane: PaneId,
+    );
+    /// Let go of every object `pane` holds, when the client driving it goes.
+    fn release(
         &self,
         pane: PaneId,
     );
@@ -58,8 +72,11 @@ pub trait Bus: BusStore {
         pane: PaneId,
         held: Held,
     );
-    /// Everything queued, in arrival order per pane.
+    /// Everything queued, in arrival order per pane, after the held stream messages that are
+    /// due.
     fn take_queued(&self) -> Vec<(PaneId, String, Message)>;
+    /// When the earliest held stream message comes due, if any is held.
+    fn next_due(&self) -> Option<Instant>;
     /// Record the kind of `pane`, whose prefix is the only private one it may write.
     fn set_kind(
         &self,
@@ -81,12 +98,17 @@ pub struct Held {
 pub struct Local(Arc<Mutex<LocalInner>>);
 struct LocalInner {
     origin: HostId,
+    /// Where this bus's `ts` count from.
+    epoch: Instant,
     retained: BTreeMap<String, Message>,
     subscribers: BTreeMap<String, BTreeSet<PaneId>>,
     kinds: BTreeMap<PaneId, String>,
     queues: BTreeMap<PaneId, VecDeque<(String, Message)>>,
+    throttles: BTreeMap<String, Throttle>,
     path: PathBuf,
     dirty: bool,
+    /// Where this host's own messages go to reach other hosts, once [`Local::tap`] asked.
+    tap: Option<UnboundedSender<(String, Message)>>,
 }
 
 impl Local {
@@ -112,14 +134,19 @@ impl Local {
         }
         let mut inner = LocalInner {
             origin,
+            epoch: Instant::now(),
             retained,
             subscribers: BTreeMap::new(),
             kinds: BTreeMap::new(),
             queues: BTreeMap::new(),
+            throttles: BTreeMap::new(),
             path,
             dirty: false,
+            tap: None,
         };
         inner.publish(None, Topic::PROTOCOL, json!({ "version": VERSION }), true);
+        // No pane holds anything across a restart.
+        inner.publish(None, Topic::OWNERS, json!({ "owners": {} }), true);
         info!(
             "{} retained topics from {}",
             inner.retained.len(),
@@ -135,6 +162,46 @@ impl Local {
             return;
         }
         let _ = bus.retain_scene(&seed_scene());
+    }
+    /// Every message this host publishes from now on, to carry to other hosts. Messages
+    /// put in with [`Local::deliver`] are not repeated here.
+    pub fn tap(&self) -> UnboundedReceiver<(String, Message)> {
+        let (tx, rx) = unbounded_channel();
+        self.0.lock().unwrap().tap = Some(tx);
+        rx
+    }
+    /// A message from another host: queue it for subscribers, and keep it if it is
+    /// retained and newer by `(seq, origin)` than the copy here. Returns whether it was
+    /// kept or delivered.
+    pub fn deliver(
+        &self,
+        topic: &str,
+        msg: Message,
+    ) -> bool {
+        let mut bus = self.0.lock().unwrap();
+        if let Some(seq) = msg.seq {
+            let newer = match bus.retained.get(topic) {
+                Some(last) => (seq, msg.origin) > (last.seq.unwrap_or(0), last.origin),
+                None => true,
+            };
+            if !newer {
+                return false;
+            }
+            bus.retained.insert(topic.to_owned(), msg.clone());
+            bus.dirty = true;
+        }
+        let panes = match bus.subscribers.get(topic) {
+            Some(panes) => panes.iter().copied().collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        for pane in panes {
+            bus.enqueue(pane, topic, msg.clone());
+        }
+        true
+    }
+    /// Every retained message, for a host that just joined.
+    pub fn snapshot(&self) -> BTreeMap<String, Message> {
+        self.0.lock().unwrap().retained.clone()
     }
 }
 
@@ -155,6 +222,13 @@ impl Bus for Local {
         }
         bus.queues.remove(&pane);
         bus.kinds.remove(&pane);
+        bus.release(pane);
+    }
+    fn release(
+        &self,
+        pane: PaneId,
+    ) {
+        self.0.lock().unwrap().release(pane);
     }
     fn hold(
         &self,
@@ -196,8 +270,12 @@ impl Bus for Local {
     ) {
         self.0.lock().unwrap().kinds.insert(pane, kind.to_owned());
     }
+    fn next_due(&self) -> Option<Instant> {
+        self.0.lock().unwrap().next_due()
+    }
     fn take_queued(&self) -> Vec<(PaneId, String, Message)> {
         let mut bus = self.0.lock().unwrap();
+        bus.flush(Instant::now());
         let mut out = Vec::new();
         for (pane, queue) in std::mem::take(&mut bus.queues) {
             for (topic, msg) in queue {
@@ -258,6 +336,13 @@ impl BusStore for Local {
             bus.refuse(pane, topic, &err);
             return;
         }
+        // A drag from anyone but the holder is noise from a lost race, not worth an answer.
+        if let Some(id) = Topic::drag_id(topic)
+            && bus.owners().holder(id) != Some(pane)
+        {
+            debug!("pane {pane} does not hold {id}, dropped {topic}");
+            return;
+        }
         bus.publish(Some(pane), topic, value, retain);
     }
 }
@@ -289,26 +374,96 @@ impl LocalInner {
             value,
             origin: self.origin,
             seq: None,
+            ts: None,
         };
         if retain {
             let last = self.retained.get(topic);
             if last.is_some_and(|last| last.value == msg.value) {
                 return;
             }
-            // Counts on from this host's own last message; another host's is its own count.
-            let seq = match last {
-                Some(last) if last.origin == self.origin => last.seq.unwrap_or(0) + 1,
-                _ => 1,
-            };
+            // A Lamport count: one past the last message, whichever host wrote it, so hosts
+            // sharing the topic agree on the newest by `(seq, origin)`.
+            let seq = last.and_then(|last| last.seq).unwrap_or(0) + 1;
             msg.seq = Some(seq);
             self.retained.insert(topic.to_owned(), msg.clone());
             self.dirty = true;
+        } else {
+            let now = Instant::now();
+            msg.ts = Some((now - self.epoch).as_millis() as u64);
+            if !self.throttle(topic, &msg, now) {
+                return;
+            }
+        }
+        debug!("{from:?} -> {topic}");
+        self.fan_out(topic, msg);
+    }
+    /// Whether a transient message may go now. A `drag/<id>` within [`STREAM_INTERVAL`] of
+    /// the last one sent is held instead, replacing any held before it, until [`Self::flush`].
+    fn throttle(
+        &mut self,
+        topic: &str,
+        msg: &Message,
+        now: Instant,
+    ) -> bool {
+        if Topic::drag_id(topic).is_none() {
+            return true;
+        }
+        match self.throttles.get_mut(topic) {
+            Some(throttle) if now < throttle.sent + STREAM_INTERVAL => {
+                throttle.held = Some(msg.clone());
+                false
+            }
+            _ => {
+                let throttle = Throttle {
+                    sent: now,
+                    held: None,
+                };
+                self.throttles.insert(topic.to_owned(), throttle);
+                true
+            }
+        }
+    }
+    fn next_due(&self) -> Option<Instant> {
+        self.throttles
+            .values()
+            .filter(|throttle| throttle.held.is_some())
+            .map(|throttle| throttle.sent + STREAM_INTERVAL)
+            .min()
+    }
+    /// Send every held stream message whose interval is over; forget idle streams.
+    fn flush(
+        &mut self,
+        now: Instant,
+    ) {
+        let mut due = Vec::new();
+        self.throttles.retain(|topic, throttle| {
+            if now < throttle.sent + STREAM_INTERVAL {
+                return true;
+            }
+            let Some(msg) = throttle.held.take() else {
+                return false;
+            };
+            throttle.sent = now;
+            due.push((topic.clone(), msg));
+            true
+        });
+        for (topic, msg) in due {
+            self.fan_out(&topic, msg);
+        }
+    }
+    /// Queue `msg` for every subscriber of `topic`.
+    fn fan_out(
+        &mut self,
+        topic: &str,
+        msg: Message,
+    ) {
+        if let Some(tap) = &self.tap {
+            let _ = tap.send((topic.to_owned(), msg.clone()));
         }
         let panes = match self.subscribers.get(topic) {
             Some(panes) => panes.iter().copied().collect::<Vec<_>>(),
             None => Vec::new(),
         };
-        debug!("{from:?} -> {topic} ({} subscribers)", panes.len());
         for pane in panes {
             self.enqueue(pane, topic, msg.clone());
         }
@@ -337,7 +492,7 @@ impl LocalInner {
                 return;
             }
         };
-        let Err(err) = self.apply(&cmd) else {
+        let Err(err) = self.apply(pane, &cmd) else {
             return;
         };
         warn!("pane {pane} {cmd:?}: {err}");
@@ -363,6 +518,32 @@ impl LocalInner {
     ) -> Result<()> {
         self.retain_checked(Topic::SCENE, serde_json::to_value(scene).unwrap())
     }
+    fn owners(&self) -> Owners {
+        match self.retained.get(Topic::OWNERS) {
+            Some(msg) => Owners::from_message(&msg.value),
+            None => Owners::default(),
+        }
+    }
+    fn retain_owners(
+        &mut self,
+        owners: &Owners,
+    ) -> Result<()> {
+        self.retain_checked(Topic::OWNERS, serde_json::to_value(owners).unwrap())?;
+        // A held drag of an object nobody holds now would land after its final position.
+        self.throttles.retain(|topic, _throttle| {
+            Topic::drag_id(topic).is_some_and(|id| owners.holder(id).is_some())
+        });
+        Ok(())
+    }
+    /// Drop every object `pane` holds.
+    fn release(
+        &mut self,
+        pane: PaneId,
+    ) {
+        let mut owners = self.owners();
+        owners.owners.retain(|_id, holder| *holder != pane);
+        let _ = self.retain_owners(&owners);
+    }
     fn retain_selection(
         &mut self,
         selection: &Selection,
@@ -383,6 +564,7 @@ impl LocalInner {
     /// changes nothing.
     fn apply(
         &mut self,
+        pane: PaneId,
         cmd: &Command,
     ) -> Result<()> {
         match cmd {
@@ -424,8 +606,11 @@ impl LocalInner {
                     None => Selection::default(),
                 };
                 selection.ids.retain(|id| !ids.contains(id));
+                let mut owners = self.owners();
+                owners.owners.retain(|id, _holder| !ids.contains(id));
                 self.retain_scene(&scene)?;
                 self.retain_selection(&selection)?;
+                self.retain_owners(&owners)?;
             }
             Command::SetProperty { ids, key, value } => {
                 if ids.is_empty() {
@@ -443,6 +628,7 @@ impl LocalInner {
                 self.retain_scene(&scene)?;
             }
             Command::MoveObject { id, position } => {
+                self.check_holder(pane, id)?;
                 let mut scene = self.scene()?;
                 let object = scene
                     .objects
@@ -452,20 +638,53 @@ impl LocalInner {
                 check_vector(position)?;
                 object.position = *position;
                 self.retain_scene(&scene)?;
+                self.throttles.remove(&Topic::drag(id));
+            }
+            Command::Grab { id } => {
+                if self.scene()?.object(id).is_none() {
+                    return Err(anyhow!("No object {id}"));
+                }
+                self.check_holder(pane, id)?;
+                let mut owners = self.owners();
+                owners.owners.insert(id.clone(), pane);
+                self.retain_owners(&owners)?;
+            }
+            Command::Release { id } => {
+                self.check_holder(pane, id)?;
+                let mut owners = self.owners();
+                owners.owners.remove(id);
+                self.retain_owners(&owners)?;
             }
         }
         Ok(())
     }
+    /// Whether `pane` may touch `id`: nobody holds it, or `pane` does.
+    fn check_holder(
+        &self,
+        pane: PaneId,
+        id: &str,
+    ) -> Result<()> {
+        match self.owners().holder(id) {
+            Some(holder) if holder != pane => Err(anyhow!("Object {id} is held by {holder}")),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// One `drag/<id>`'s pace: when a message last went, and the latest one waiting since.
+struct Throttle {
+    sent: Instant,
+    held: Option<Message>,
 }
 
 /// What a pane of `kind` may publish, or retain if `retain`: the standard transient topics
-/// (not retained) and `<kind>/<name>`.
+/// and `drag/<id>` (not retained), and `<kind>/<name>`.
 fn check_topic(
     kind: Option<&str>,
     topic: &str,
     retain: bool,
 ) -> Result<()> {
-    if Topic::TRANSIENT.contains(&topic) {
+    if Topic::TRANSIENT.contains(&topic) || Topic::drag_id(topic).is_some() {
         if retain {
             return Err(anyhow!("{topic} is transient, it cannot be retained"));
         }
@@ -687,6 +906,8 @@ mod test {
         assert_eq!(queued[1].2.value, json!({ "version": 1 }));
         assert_eq!(queued[1].2.seq, Some(1));
         assert_eq!(queued[2].2.seq, None);
+        assert!(queued[1].2.ts.is_none());
+        assert!(queued[2].2.ts.is_some());
         assert!(queued.iter().all(|(_pane, _topic, msg)| msg.origin == HOST));
         assert!(bus.take_queued().is_empty());
         // Transient messages reach only current subscribers; the sender hears its own.
@@ -962,6 +1183,185 @@ mod test {
         );
     }
 
+    fn grab(id: &str) -> Command {
+        Command::Grab { id: id.to_owned() }
+    }
+
+    fn release(id: &str) -> Command {
+        Command::Release { id: id.to_owned() }
+    }
+
+    fn holder(
+        bus: &Local,
+        id: &str,
+    ) -> Option<PaneId> {
+        Owners::from_message(&bus.retained(Topic::OWNERS).unwrap().value).holder(id)
+    }
+
+    #[test]
+    fn test_grab_in_arrival_order() {
+        let bus = open(&tmp());
+        add(&bus, "a");
+        bus.subscribe(pid(1), &Topic::rejected(pid(1)));
+        bus.subscribe(pid(2), &Topic::rejected(pid(2)));
+        bus.take_queued();
+        // The first grab wins; the second is denied on the loser's rejected topic.
+        command(&bus, pid(1), grab("a"));
+        command(&bus, pid(2), grab("a"));
+        assert_eq!(holder(&bus, "a"), Some(pid(1)));
+        let queued = bus.take_queued();
+        assert_eq!(
+            topics(&queued),
+            vec![(2, "rejected/00000000000000000000000000000abc-2")]
+        );
+        let denied: Rejected = serde_json::from_value(queued[0].2.value.clone()).unwrap();
+        assert_eq!(denied.cmd, grab("a"));
+        assert!(denied.reason.contains("held by"));
+        // Grabbing again is fine for the holder; nobody else moves or releases it.
+        command(&bus, pid(1), grab("a"));
+        let moved = Command::MoveObject {
+            id: "a".to_owned(),
+            position: [5.0, 0.0, 0.0],
+        };
+        command(&bus, pid(2), moved.clone());
+        command(&bus, pid(2), release("a"));
+        assert_eq!(topics(&bus.take_queued()).len(), 2);
+        assert_eq!(holder(&bus, "a"), Some(pid(1)));
+        let scene = Scene::from_message(&bus.retained(Topic::SCENE).unwrap().value);
+        assert_eq!(scene.object("a").unwrap().position, [0.0; 3]);
+        // The holder moves and lets go; then the other pane may grab it.
+        command(&bus, pid(1), moved);
+        command(&bus, pid(1), release("a"));
+        assert_eq!(holder(&bus, "a"), None);
+        command(&bus, pid(2), grab("a"));
+        assert_eq!(holder(&bus, "a"), Some(pid(2)));
+        assert!(bus.take_queued().is_empty());
+        // An unknown object cannot be grabbed; a removed one is let go.
+        command(&bus, pid(1), grab("zz"));
+        assert_eq!(topics(&bus.take_queued()).len(), 1);
+        let remove = Command::RemoveObjects {
+            ids: vec!["a".to_owned()],
+        };
+        command(&bus, pid(1), remove);
+        assert_eq!(holder(&bus, "a"), None);
+    }
+
+    #[test]
+    fn test_drag_only_from_holder() {
+        let bus = open(&tmp());
+        bus.set_kind(pid(1), "view2d");
+        bus.set_kind(pid(2), "view2d");
+        add(&bus, "a");
+        let topic = Topic::drag("a");
+        bus.subscribe(pid(3), &topic);
+        bus.subscribe(pid(2), &Topic::rejected(pid(2)));
+        let sample = json!({ "id": "a", "position": [1, 2, 0] });
+        // Nobody holds it, then pane 1 does: only pane 1's drags go through, silently.
+        bus.publish(pid(1), &topic, sample.clone(), false);
+        command(&bus, pid(1), grab("a"));
+        bus.take_queued();
+        bus.publish(pid(2), &topic, sample.clone(), false);
+        bus.publish(pid(1), &topic, sample.clone(), false);
+        let queued = bus.take_queued();
+        assert_eq!(topics(&queued), vec![(3, "drag/a")]);
+        assert!(queued[0].2.ts.is_some());
+        // A drag topic is never retained.
+        bus.publish(pid(1), &topic, sample, true);
+        assert_eq!(bus.retained(&topic), None);
+    }
+
+    #[test]
+    fn test_release_when_pane_goes() {
+        let bus = open(&tmp());
+        add(&bus, "a");
+        add(&bus, "b");
+        command(&bus, pid(1), grab("a"));
+        command(&bus, pid(1), grab("b"));
+        command(&bus, pid(2), grab("b"));
+        bus.release(pid(2));
+        assert_eq!(holder(&bus, "b"), Some(pid(1)));
+        bus.release(pid(1));
+        assert_eq!(holder(&bus, "a"), None);
+        assert_eq!(holder(&bus, "b"), None);
+        command(&bus, pid(1), grab("a"));
+        bus.unsubscribe(pid(1));
+        assert_eq!(holder(&bus, "a"), None);
+    }
+
+    #[test]
+    fn test_drag_throttle_keeps_latest() {
+        let bus = open(&tmp());
+        bus.subscribe(pid(2), "drag/a");
+        let mut inner = bus.0.lock().unwrap();
+        let msg = |x| Message {
+            value: json!({ "id": "a", "position": [x, 0, 0] }),
+            origin: HOST,
+            seq: None,
+            ts: None,
+        };
+        let t0 = Instant::now();
+        let step = STREAM_INTERVAL / 4;
+        assert!(inner.throttle("drag/a", &msg(1), t0));
+        assert!(!inner.throttle("drag/a", &msg(2), t0 + step));
+        assert!(!inner.throttle("drag/a", &msg(3), t0 + step * 2));
+        // Each object has its own pace, and other topics none.
+        assert!(inner.throttle("drag/b", &msg(9), t0 + step));
+        assert!(inner.throttle("hover", &msg(9), t0 + step));
+        assert!(inner.throttle("hover", &msg(9), t0 + step));
+        assert_eq!(inner.next_due(), Some(t0 + STREAM_INTERVAL));
+        inner.flush(t0 + step * 3);
+        assert!(inner.queues.is_empty());
+        // Once the interval is over, only the latest goes, and the pace counts from it.
+        inner.flush(t0 + STREAM_INTERVAL);
+        let queue = inner.queues.remove(&pid(2)).unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].1, msg(3));
+        assert_eq!(inner.next_due(), None);
+        let t1 = t0 + STREAM_INTERVAL;
+        assert!(!inner.throttle("drag/a", &msg(4), t1 + step));
+        assert!(inner.throttle("drag/a", &msg(5), t1 + STREAM_INTERVAL));
+        // A stream with nothing held is forgotten after its interval.
+        inner.flush(t1 + STREAM_INTERVAL * 3);
+        assert!(inner.throttles.is_empty());
+    }
+
+    #[test]
+    fn test_drop_discards_held_drag() {
+        let bus = open(&tmp());
+        bus.set_kind(pid(1), "view2d");
+        add(&bus, "a");
+        command(&bus, pid(1), grab("a"));
+        bus.subscribe(pid(2), "drag/a");
+        bus.subscribe(pid(2), Topic::SCENE);
+        bus.take_queued();
+        let sample = |x| json!({ "id": "a", "position": [x, 0, 0] });
+        bus.publish(pid(1), "drag/a", sample(1), false);
+        bus.publish(pid(1), "drag/a", sample(2), false);
+        let moved = Command::MoveObject {
+            id: "a".to_owned(),
+            position: [3.0, 0.0, 0.0],
+        };
+        command(&bus, pid(1), moved);
+        assert_eq!(bus.next_due(), None);
+        bus.0
+            .lock()
+            .unwrap()
+            .flush(Instant::now() + STREAM_INTERVAL * 2);
+        let queued = bus.take_queued();
+        assert_eq!(topics(&queued), vec![(2, "drag/a"), (2, "scene")]);
+        assert_eq!(queued[0].2.value, sample(1));
+    }
+
+    #[test]
+    fn test_owners_reset_on_open() {
+        let path = tmp();
+        let bus = open(&path);
+        add(&bus, "a");
+        command(&bus, pid(1), grab("a"));
+        bus.save().unwrap();
+        assert_eq!(holder(&open(&path), "a"), None);
+    }
+
     #[test]
     fn test_set_property_many() {
         let bus = open(&tmp());
@@ -1048,5 +1448,36 @@ mod test {
         assert_eq!(partial.retained(Topic::SCENE), None);
         assert_eq!(partial.retained("view2d/view").unwrap().seq, Some(2));
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn deliver_keeps_the_newest() {
+        let bus = open(&tmp().join("bus.json"));
+        let mut tap = bus.tap();
+        bus.set_kind(pid(1), "view2d");
+        bus.subscribe(pid(1), "view2d/view");
+        bus.publish(pid(1), "view2d/view", json!({ "zoom": 2 }), true);
+        let (topic, mine) = tap.try_recv().unwrap();
+        assert_eq!((topic.as_str(), mine.seq), ("view2d/view", Some(1)));
+        let other = HostId(0xdef);
+        let msg = |zoom, seq| Message {
+            value: json!({ "zoom": zoom }),
+            origin: other,
+            seq: Some(seq),
+            ts: None,
+        };
+        // Same seq, higher origin wins; an older one is dropped.
+        assert!(bus.deliver("view2d/view", msg(3, 1)));
+        assert!(!bus.deliver("view2d/view", msg(4, 0)));
+        assert_eq!(
+            bus.retained("view2d/view").unwrap().value,
+            json!({ "zoom": 3 })
+        );
+        // Delivered messages are not tapped again; the next local write counts on.
+        assert!(tap.try_recv().is_err());
+        bus.publish(pid(1), "view2d/view", json!({ "zoom": 5 }), true);
+        assert_eq!(bus.retained("view2d/view").unwrap().seq, Some(2));
+        let queued = bus.take_queued();
+        assert_eq!(queued.len(), 3);
     }
 }

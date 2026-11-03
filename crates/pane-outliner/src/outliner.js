@@ -1,8 +1,8 @@
 // The scene as a tree grouped by kind. A click on an object is a Select, double click a
 // Focus, the pointer coming onto or leaving an object a Hover; group rows do nothing.
-import { mount as tree } from '../widgets/tree.js';
-import { Emits } from '../protocol.js';
-import { flash } from '../note.js';
+import { mount as tree } from 'yakui/widgets/tree.js';
+import { Emits } from 'yakui/protocol.js';
+import { flash } from 'yakui/note.js';
 
 export function mount(root, { send, onEvent }) {
   root.innerHTML = `<style>

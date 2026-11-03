@@ -1,7 +1,7 @@
 // A palette grid; a pick is one message. Which swatch is lit comes from the scene.
-import { mount as paletteGrid } from '../widgets/palette-grid.js';
-import { Emits } from '../protocol.js';
-import { flash } from '../note.js';
+import { mount as paletteGrid } from 'yakui/widgets/palette-grid.js';
+import { Emits } from 'yakui/protocol.js';
+import { flash } from 'yakui/note.js';
 
 export function mount(root, { send, onEvent }) {
   root.innerHTML = `<style>

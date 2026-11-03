@@ -198,8 +198,9 @@ export function mount(el, props, emit) -> { update(props), destroy() }
 
 Panes compose widgets; widgets never compose panes and never import other
 panes. A widget may import another widget. The host does not know widgets
-exist: they are served as static files from the pane or a shared `widgets/`
-directory of the host's web root.
+exist: they are served as static files from the host's versioned
+`/lib/v<n>/widgets/` (see "Shared web modules" in `PROTOCOL.md`), imported
+as `yakui/widgets/<name>.js` through the shell's import map.
 
 ### The bus
 
@@ -240,7 +241,7 @@ Built 2026-11-01, as PROTOCOL.md says, with these choices:
 
 - The scene schema is PROTOCOL.md's: `scene = { objects: [Object] }`,
   `Object = { id, name, kind, position: [x,y,z], size: [x,y,z], color:
-  "#rrggbb", props? }`; view2d shows the x/y plane (y up), view3d the same
+"#rrggbb", props? }`; view2d shows the x/y plane (y up), view3d the same
   scene with an orbit camera. Panes read it with the tolerant readers in
   `pane-api::protocol` (a bad object is skipped, a bad topic reads as empty).
 - Seeding: the host retains four objects (fixed ids) as `scene` when a
@@ -293,6 +294,75 @@ Open: iroh crate versions move fast (gossip/docs/blobs are separate crates
 since iroh 0.28; check crates.io at build time); whether `iroh-docs` stays
 maintained in its current shape, else retained topics go over gossip with
 authority-stamped seq plus a sync request on join.
+
+### IrohBus (built 2026-11-02, feature `iroh`)
+
+`host::iroh_bus::IrohBus` wraps a `Local` bus; `cargo build -p host --features
+iroh` adds it, the default build is unchanged. Pinned: `iroh` 1.4,
+`iroh-gossip` 0.101.
+
+- **One gossip topic per space** carries both kinds of message as JSON
+  `{ topic, msg }`. `Local::tap` hands out what this host publishes;
+  `Local::deliver` queues another host's for subscribers.
+- **Retained topics: a replica over gossip, not iroh-docs.** iroh-docs pulls
+  in iroh-blobs and a redb store, and keeps its own copy beside `bus.json`;
+  the bus already has one small retained map. Instead `seq` is a Lamport
+  count (one past the last, whichever host wrote it), a host keeps a copy
+  only if it is newer by `(seq, origin)`, and every host sends its retained
+  map to each new gossip neighbour. That converges without a second store.
+- **Join**: `IrohBus::join(local, ticket, relays)`; `ticket()` is base32 of
+  the gossip topic and this host's address. `Relays::Default` uses iroh's
+  public relays and address lookup (hosts behind NAT); `Relays::Off` dials
+  direct addresses only (LAN, tests).
+- Tested: two in-process hosts, relays off: a retained topic written before
+  the join converges, a transient message reaches the other host's
+  subscriber, a later write on either side wins on both.
+
+- **CLI** (feature `iroh`): `host --share <space>` opens that space on an
+  `IrohBus`, prints its ticket and serves it at `/s/<space>/ticket`;
+  `host --share <space> --join <ticket>` joins another host's; `--no-relays`
+  for LAN/tests. Other spaces stay on `Local`.
+
+Left: picking the bus from per-space config (today only the flag); command authority for standard topics (today every host applies commands
+and the newest `scene` wins); remote pane modules and their msg/event relay;
+blobs.
+
+## Drags: streams, grabs and rollback (2026-11-02)
+
+Cal's spec, hand-rolled (no ggrs, lightyear or naia):
+
+- **Stream, then commit.** While dragging, view2d publishes the object on
+  the transient `drag/<id>` once per pointer move; the drop is still one
+  `move_object`, so `scene` only ever holds final positions. The host paces
+  each `drag/<id>` to 60 Hz, holding back the latest (a connection wakes
+  when it comes due and flushes it; idle connections never wake) and discarding a held one once the object is
+  dropped or let go, so no sample lands after the final position.
+- **Draw behind, snap forward.** Receivers draw a stream through
+  `interpolate(topic)` in `web/protocol.js`: three samples, drawn one
+  sample interval behind the newest, at most 100 ms of extrapolation when
+  samples stop, and a snap (eased over 150 ms) when `scene` changes or
+  `owners` drops the object. Positions only: objects have no rotation yet,
+  so there is no slerp. `node crates/host/tests/interpolate.mjs` tests it.
+- **Grab with rollback.** `grab`/`release` are commands, decided by the
+  host in arrival order into the retained `owners` map (one map, since
+  there are no wildcard subscriptions). The dragging pane predicts its grab
+  from the first move; a lost grab comes back as an ordinary rejection of
+  the `grab`, and the loser drops its prediction, flashes the object's
+  outline and eases over to the holder's stream. Only the holder's drags
+  pass the host, and only the holder may `move_object` a held object. A
+  holder lets go on `release`, when its pane goes, or when the client
+  connection that last drove its pane closes; `owners` starts empty on
+  every host start.
+
+Later sync slots in beside this rather than replacing it: every transient
+message carries `{origin, ts}` (a monotonic clock per host) and every
+retained one `{origin, seq}`, so a stream can be reordered and spaced per
+origin and a retained topic's versions ordered by `(seq, origin)`, which is what a
+CRDT (a per-object last-writer-wins register keyed by `(seq, origin)`) or a
+lightyear-style replication layer needs as input. The host stays the one
+authority for `owners`, so with `IrohBus` a grab is forwarded to the
+authority like any other command, and `drag/<id>` rides gossip as a
+transient topic.
 
 ## Future option: WASM panes (parked)
 

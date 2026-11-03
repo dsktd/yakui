@@ -1,8 +1,14 @@
 // Front view of the scene (x right, y up) on a canvas. Pan, zoom, drag and hover hit-testing
-// are local; the Rust half hears one message per click, drop, hover change and view at rest.
-import { mount as toolbar } from '../widgets/toolbar.js';
-import { Emits, Kind, isColor } from '../protocol.js';
-import { flash } from '../note.js';
+// are local; the Rust half hears one message per click, hover change and view at rest, and
+// for a drag a grab, one position per frame and a drop. Other panes' drags are drawn from
+// their stream through `interpolate`, and snap to the scene when it changes.
+import { mount as toolbar } from 'yakui/widgets/toolbar.js';
+import { Emits, Kind, interpolate, isColor, lerp } from 'yakui/protocol.js';
+import { flash } from 'yakui/note.js';
+
+// How long a cancelled drag or a snap eases into place, and a denied grab's outline shows.
+const TWEEN = 150;
+const DENIED = 600;
 
 export function mount(root, { send, onEvent }) {
   root.innerHTML = `<style>
@@ -19,9 +25,15 @@ export function mount(root, { send, onEvent }) {
   let objects = [];
   let selected = new Set();
   let hovered = null;
+  let owners = {}; // object id -> the pane holding it
   let view = { x: 0, y: 0, zoom: 40 }; // world units; zoom is pixels per unit
-  let drag = null; // { kind: 'pan' | 'object', id, start, from, moved }
+  let drag = null; // { kind: 'pan' | 'object', id, start, from, moved, position }
   let viewTimer = null;
+  let frame = 0;
+  const streams = new Map(); // object id -> interpolate(), another pane's drag
+  const tweens = new Map(); // object id -> { from, start }, easing into place
+  const mine = new Set(); // ids this client grabbed, until `owners` lets go: our own echo
+  let denied = null; // { id, until }
 
   const num = (v, d) => (Number.isFinite(v) ? v : d);
   const vec = (v) => (Array.isArray(v) ? [num(v[0], 0), num(v[1], 0), num(v[2], 0)] : [0, 0, 0]);
@@ -31,8 +43,36 @@ export function mount(root, { send, onEvent }) {
     return [w / 2 + (x - view.x) * view.zoom, h / 2 - (y - view.y) * view.zoom];
   };
   const object = (id) => objects.find((o) => o.id === id);
+  const inHand = (id) => drag?.kind === 'object' && drag.moved && drag.id === id;
+
+  // Where to draw `o` now: in hand, along another pane's stream, or the scene's, eased from
+  // wherever it was last drawn when that changed.
+  function shown(o, now) {
+    if (inHand(o.id)) return drag.position;
+    const target = streams.get(o.id)?.at(now) ?? vec(o.position);
+    const tween = tweens.get(o.id);
+    if (!tween) return target;
+    const k = (now - tween.start) / TWEEN;
+    if (k >= 1) {
+      tweens.delete(o.id);
+      return target;
+    }
+    return lerp(tween.from, target, k * (2 - k));
+  }
+  // Ease `id` from where it is drawn now to wherever it goes next.
+  const ease = (id, from) => tweens.set(id, { from, start: performance.now() });
+  const easeFromShown = (id) => {
+    const o = object(id);
+    if (o) ease(id, shown(o, performance.now()));
+  };
+  const snap = (id) => {
+    if (!streams.has(id)) return;
+    easeFromShown(id);
+    streams.delete(id);
+  };
 
   function draw() {
+    const now = performance.now();
     const dpr = devicePixelRatio || 1;
     const [w, h] = size();
     if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
@@ -49,8 +89,9 @@ export function mount(root, { send, onEvent }) {
     ctx.moveTo(0, oy); ctx.lineTo(w, oy);
     ctx.moveTo(ox, 0); ctx.lineTo(ox, h);
     ctx.stroke();
+    if (denied && now >= denied.until) denied = null;
     for (const o of objects) {
-      const [x, y] = vec(o.position);
+      const [x, y] = shown(o, now);
       const [sx, sy] = vec(o.size);
       const [cx, cy] = toScreen(x, y);
       const pw = Math.max(2, sx * view.zoom);
@@ -63,19 +104,32 @@ export function mount(root, { send, onEvent }) {
         ctx.lineTo(cx, cy + ph / 2); ctx.lineTo(cx - pw / 2, cy); ctx.closePath();
       } else ctx.rect(cx - pw / 2, cy - ph / 2, pw, ph);
       ctx.fill();
-      if (selected.has(o.id) || hovered === o.id) {
+      if (denied?.id === o.id) {
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#e6a700';
+        ctx.stroke();
+      } else if (selected.has(o.id) || hovered === o.id) {
         ctx.lineWidth = selected.has(o.id) ? 2 : 1;
         ctx.strokeStyle = selected.has(o.id) ? '#fff' : '#aaa';
         ctx.stroke();
       }
     }
+    // Keep drawing while something moves on its own.
+    const live = [...streams.values()].some((s) => s.live);
+    if ((live || tweens.size || denied) && !frame) {
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        draw();
+      });
+    }
   }
 
   // The topmost object under a canvas point, or null.
   function hit(px, py) {
+    const now = performance.now();
     for (let i = objects.length - 1; i >= 0; i--) {
       const o = objects[i];
-      const [x, y] = vec(o.position);
+      const [x, y] = shown(o, now);
       const [sx, sy] = vec(o.size);
       const [cx, cy] = toScreen(x, y);
       const dx = (px - cx) / Math.max(2, sx * view.zoom) * 2;
@@ -117,7 +171,7 @@ export function mount(root, { send, onEvent }) {
     const id = hit(e.offsetX, e.offsetY);
     const start = [e.offsetX, e.offsetY];
     drag = id
-      ? { kind: 'object', id, start, from: vec(object(id).position), moved: false }
+      ? { kind: 'object', id, start, from: shown(object(id), performance.now()), moved: false }
       : { kind: 'pan', start, from: [view.x, view.y], moved: false };
   });
   canvas.addEventListener('pointermove', (e) => {
@@ -131,15 +185,21 @@ export function mount(root, { send, onEvent }) {
     }
     const dx = (e.offsetX - drag.start[0]) / view.zoom;
     const dy = -(e.offsetY - drag.start[1]) / view.zoom;
-    if (Math.hypot(dx, dy) * view.zoom > 3) drag.moved = true;
+    if (!drag.moved && Math.hypot(dx, dy) * view.zoom > 3) {
+      drag.moved = true;
+      // Predict the grab: the object follows the pointer until the host says otherwise.
+      if (drag.kind === 'object') {
+        mine.add(drag.id);
+        send({ Grab: { id: drag.id } });
+      }
+    }
     if (!drag.moved) return;
     if (drag.kind === 'pan') {
       view.x = drag.from[0] - dx;
       view.y = drag.from[1] - dy;
     } else {
       drag.position = [drag.from[0] + dx, drag.from[1] + dy, drag.from[2]];
-      const o = object(drag.id);
-      if (o) o.position = drag.position;
+      send({ Drag: { id: drag.id, position: drag.position } });
     }
     draw();
   });
@@ -150,7 +210,11 @@ export function mount(root, { send, onEvent }) {
       selected = new Set(ids);
       send({ Select: { ids } });
     } else if (drag.kind === 'object') {
+      // Keep it where it was dropped until the scene says where it is.
+      const o = object(drag.id);
+      if (o) o.position = drag.position;
       send({ Move: { id: drag.id, position: drag.position } });
+      send({ Release: { id: drag.id } });
     } else settleView();
     drag = null;
     draw();
@@ -184,16 +248,45 @@ export function mount(root, { send, onEvent }) {
     }
   });
 
+  // A new `owners`: a stream whose holder let go without a drop (its client went) eases
+  // back to the scene, and our own grabs that ended are ours no more.
+  const setOwners = (next) => {
+    owners = next && typeof next === 'object' ? next : {};
+    for (const id of [...streams.keys()]) if (!(id in owners)) snap(id);
+    for (const id of [...mine]) if (!(id in owners) && !inHand(id)) mine.delete(id);
+  };
+
   onEvent((e) => {
     if (e.State) {
       objects = e.State.scene?.objects ?? [];
       selected = new Set(e.State.selection?.ids ?? []);
+      setOwners(e.State.owners?.owners);
       applyView(e.State.view);
     } else if (e.Scene) {
+      const before = new Map(objects.map((o) => [o.id, JSON.stringify(vec(o.position))]));
       objects = e.Scene.scene?.objects ?? [];
-      // Keep the object in hand where the pointer has it.
-      const o = drag?.position && object(drag.id);
-      if (o) o.position = drag.position;
+      // The retained position wins over a stream as soon as it changes.
+      for (const id of [...streams.keys()]) {
+        const o = object(id);
+        if (!o) streams.delete(id);
+        else if (before.get(id) !== JSON.stringify(vec(o.position))) snap(id);
+      }
+    } else if (e.Owners) setOwners(e.Owners.owners?.owners);
+    else if (e.Drag) {
+      const { topic, id, position, ts } = e.Drag;
+      if (mine.has(id) || !(id in owners)) return;
+      if (!streams.has(id)) streams.set(id, interpolate(topic));
+      streams.get(id).push(vec(position), ts);
+    } else if (e.Denied) {
+      const { id, reason } = e.Denied;
+      mine.delete(id);
+      // Drop the prediction and ease over to the holder's stream.
+      if (inHand(id)) {
+        ease(id, drag.position);
+        drag = null;
+      }
+      denied = { id, until: performance.now() + DENIED };
+      flash(note, reason);
     } else if (e.Selection) selected = new Set(e.Selection.selection?.ids ?? []);
     else if (e.Hover) hovered = e.Hover.hover?.id ?? null;
     else if (e.Focus) {
@@ -217,5 +310,6 @@ export function mount(root, { send, onEvent }) {
     observer.disconnect();
     tools.destroy();
     clearTimeout(viewTimer);
+    cancelAnimationFrame(frame);
   };
 }

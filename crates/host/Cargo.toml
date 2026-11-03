@@ -24,4 +24,14 @@ dirs = "6"
 env_logger = "0.11"
 futures-util = "0.3"
 rand = "0.9"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+# The IrohBus: another host's panes on this bus, over iroh (DESIGN.md).
+data-encoding = { version = "2", optional = true }
+iroh = { version = "1.4", optional = true }
+iroh-gossip = { version = "0.101", optional = true }
+
+[features]
+iroh = ["dep:iroh", "dep:iroh-gossip", "dep:data-encoding"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["time"] }
