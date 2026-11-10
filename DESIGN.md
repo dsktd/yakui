@@ -427,3 +427,11 @@ over the LAN shows no visible lag.
 Rust, per ~/claude/style-study/rust-STYLE-STUDY.md. Small purpose-built types,
 minimal API and error surface. Hand-written only; no code is derived from
 `ai-gui` unless Cal asks (it stays in the attic).
+
+## CI
+
+`.github/workflows/ci.yml` runs on pull requests, pushes to main and by hand:
+`cargo fmt --check`, then in one job (with the webkitgtk/gtk apt packages that
+shell-tauri needs) `cargo clippy --workspace --all-targets -D warnings`,
+`cargo test --workspace` and `cargo build --workspace`. No test needs a
+display or GPU. The aggregate job `ci-ok` is the one required check.
